@@ -88,9 +88,7 @@ void restoreTree(DB* db, FILE* wal){
         if(strcmp(cmd, "SET") == 0){
             char* key = strtok_r(NULL, " ", &saveptr);
             char* val = strtok_r(NULL, "\n", &saveptr);
-            printf("%s %s %s\n", cmd, key, val);
             insertTree(&(db->root), key, val);
-            printf("insert done\n");
         }
     }
     free(buffer);

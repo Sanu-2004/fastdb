@@ -27,6 +27,10 @@ void repl(DB* db){
         if(strcmp(cmd, "SET") == 0){
             char* key = strtok_r(NULL, " ", &saveptr);
             char* val = strtok_r(NULL, "\n", &saveptr);
+            if(!key || !val) {
+                puts("Usage: SET key value");
+                continue;
+            }
             insert(db, key, val);
         }
         else if(strcmp(cmd, "GET") == 0){
