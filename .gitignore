@@ -1,2 +1,3 @@
 build/
-wal*.log
+*wal*.log
+tables/

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include<sstable.h>
 
 // void setValueCmd(Node** root, char* k, char* v) {
 //     // insert(root, k, v);
@@ -36,6 +37,9 @@ void repl(DB* db){
         else if(strcmp(cmd, "GET") == 0){
             char* key = strtok_r(NULL, " ", &saveptr);
             getValueCmd(db->root, key);
+        }
+        else if(strcmp(cmd, "WRITE") == 0){
+            createSSTable(db);
         }
         else if(strcmp(cmd, "PRINT") == 0){
             inorder(db->root);
