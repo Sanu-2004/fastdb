@@ -3,14 +3,35 @@
 #include <string.h>
 #include <stdio.h>
 #include<sstable.h>
+#include<ctype.h>
 
-// void setValueCmd(Node** root, char* k, char* v) {
-//     // insert(root, k, v);
-//     print()
-// }
+char* trim(char *str) {
+    char *end;
 
-void getValueCmd(Node* root, char* s) {
-    char* val = getValue(root, s);
+    // Trim leading whitespace
+    while(isspace((unsigned char)*str)) {
+        str++;
+    }
+
+    // If all spaces
+    if(*str == 0) {
+        return str;
+    }
+
+    // Trim trailing whitespace
+    end = str + strlen(str) - 1;
+    while(end > str && isspace((unsigned char)*end)) {
+        end--;
+    }
+
+    // Null terminate after last non-space character
+    *(end + 1) = '\0';
+
+    return str;
+}
+
+void getValueCmd(DB* db, char* s) {
+    char* val = get(db, trim(s));
     printf("%s\n", val?val:"NULL");
 }
 
@@ -36,7 +57,7 @@ void repl(DB* db){
         }
         else if(strcmp(cmd, "GET") == 0){
             char* key = strtok_r(NULL, " ", &saveptr);
-            getValueCmd(db->root, key);
+            getValueCmd(db, key);
         }
         else if(strcmp(cmd, "WRITE") == 0){
             createSSTable(db);
@@ -44,6 +65,8 @@ void repl(DB* db){
         else if(strcmp(cmd, "PRINT") == 0){
             inorder(db->root);
             printf("\n");
+        } else if(strcmp(cmd, "SIZE") == 0){
+            printf("WAL Size: %d bytes\n", db->size);
         }
         else{
             puts("Help:\nSET key value\nGET key\nPRINT");

@@ -1,15 +1,21 @@
 #ifndef SSTABLE_H
 #define SSTABLE_H
-#define DIRNAME "tables"
-#define levels 3
 #include<db.h>
+#include<config.h>
 
-static int folderStructureExists = 0;
+typedef struct Footer {
+    long long index_offset;
+    long long total_entries;
+} Footer;
 
 void createFoldertructure();
 
 void createSSTable(DB* db);
 
-void writeNodeToSSTable(Node* node, FILE* sstable);
+void writeNodeToSSTable(Node* node, FILE* sstable, long long* line, long long* offsets);
+
+char* readValueFromSSTable(FILE* sstable, long long* indexs, const char* key, long long left, long long right);
+
+char* searchSSTables(const char* key);
 
 #endif

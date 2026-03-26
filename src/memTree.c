@@ -134,3 +134,12 @@ char*  getValue(Node* root, char* data) {
     }
     return NULL;    
 }
+
+void FreeTree(Node* root) {
+    if (!root) return;
+    FreeTree(root->left);
+    FreeTree(root->right);
+    free(root->key);
+    free(root->value);
+    free(root);
+}

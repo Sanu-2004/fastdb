@@ -1,40 +1,60 @@
-#include<db.h>
-#include<dirent.h>
-#include<string.h>
+#include <db.h>
+#include <dirent.h>
+#include <string.h>
 #include <time.h>
+#include <sstable.h>
 
-DB* createEmptyDB(){
-    DB* db = (DB*)malloc(sizeof(DB));
+DB *createEmptyDB()
+{
+    DB *db = (DB *)malloc(sizeof(DB));
     db->root = NULL;
-    FILE* recentWal = getRecentWalFile(".");
-    if(!recentWal){
-        recentWal = createWalFile();
-    } else {
-        restoreTree(db, recentWal);
-    }
+    db->size = 0;
+    FILE *recentWal = getRecentWalFile(WALL_DIR);
+    
+    if (!recentWal) recentWal = createWalFile();
+    else restoreTree(db, recentWal);
+
     db->wal = recentWal;
     return db;
 }
 
-void insert(DB* db, char* key, char* val) {
+void insert(DB *db, char *key, char *val)
+{
+    db->size += sizeof(key) + sizeof(val);
     fprintf(db->wal, "SET %s %s\n", key, val);
     fflush(db->wal);
     insertTree(&(db->root), key, val);
+    if (db->size >= MAX_WAL_SIZE)
+    {
+        createSSTable(db);
+        fclose(db->wal);
+        clearWALFiles(WALL_DIR);
+        FreeTree(db->root);
+        db->root = NULL;
+        db->size = 0;
+        db->wal = createWalFile();
+    }
 }
 
-FILE* getRecentWalFile(const char* dir) {
-    DIR* dp = opendir(dir);
-    if(!dp) return NULL;
+FILE *getRecentWalFile(const char *dir)
+{
+    DIR *dp = opendir(dir);
+    if (!dp)
+        return NULL;
 
-    struct dirent* entry;
-    char* latest = NULL;
+    struct dirent *entry;
+    char *latest = NULL;
     long max_ts = 0;
 
-    while((entry = readdir(dp)) != NULL) {
-        if(strncmp(entry->d_name, "wal_", 4) != 0) continue;
+    while ((entry = readdir(dp)) != NULL)
+    {
+        if (strncmp(entry->d_name, "wal_", 4) != 0)
+            continue;
         size_t len = strlen(entry->d_name);
-        if(len < 8) continue;
-        if(strcmp(entry->d_name + len - 4, ".log") != 0) continue;
+        if (len < 8)
+            continue;
+        if (strcmp(entry->d_name + len - 4, ".log") != 0)
+            continue;
 
         // extract timestamp
         char tsbuf[32];
@@ -42,25 +62,29 @@ FILE* getRecentWalFile(const char* dir) {
         tsbuf[len - 8] = '\0';
 
         long ts = atol(tsbuf);
-        if(ts > max_ts) {
+        if (ts > max_ts)
+        {
             max_ts = ts;
             free(latest);
             latest = strdup(entry->d_name);
         }
     }
     closedir(dp);
-    
-    FILE* wal = fopen(latest, "a+");
-    if (!wal) {
+
+    FILE *wal = fopen(latest, "a+");
+    if (!wal)
+    {
         perror("fopen");
         return NULL;
     }
     return wal;
 }
 
-FILE* createWalFile() {
-    time_t now = time(NULL); 
-    if (now == ((time_t)-1)) {
+FILE *createWalFile()
+{
+    time_t now = time(NULL);
+    if (now == ((time_t)-1))
+    {
         perror("time");
         return NULL;
     }
@@ -69,27 +93,58 @@ FILE* createWalFile() {
 
     sprintf(filename, "wal_%ld.log", now);
 
-    FILE* wal = fopen(filename, "a+");
-    if (!wal) {
+    FILE *wal = fopen(filename, "a+");
+    if (!wal)
+    {
         perror("fopen");
         return NULL;
     }
 
-    printf("Created WAL file: %s\n", filename);
     return wal;
 }
 
-void restoreTree(DB* db, FILE* wal){
-    char* buffer = NULL;
+void restoreTree(DB *db, FILE *wal)
+{
+    char *buffer = NULL;
     size_t len = 0;
-    char* saveptr;
-    while(getline(&buffer, &len, wal) != -1){
-        char* cmd = strtok_r(buffer, " \n", &saveptr);
-        if(strcmp(cmd, "SET") == 0){
-            char* key = strtok_r(NULL, " ", &saveptr);
-            char* val = strtok_r(NULL, "\n", &saveptr);
+    char *saveptr;
+    while (getline(&buffer, &len, wal) != -1)
+    {
+        char *cmd = strtok_r(buffer, " \n", &saveptr);
+        if (strcmp(cmd, "SET") == 0)
+        {
+            char *key = strtok_r(NULL, " ", &saveptr);
+            char *val = strtok_r(NULL, "\n", &saveptr);
+            db->size += sizeof(key) + sizeof(val);
             insertTree(&(db->root), key, val);
         }
     }
     free(buffer);
+}
+
+void clearWALFiles(const char* dir) {
+    DIR* dp = opendir(dir);
+    if (!dp) return;
+
+    struct dirent* entry;
+    while ((entry = readdir(dp)) != NULL) {
+        if (strncmp(entry->d_name, "wal_", 4) == 0) {
+            size_t len = strlen(dir) + strlen(entry->d_name) + 2;
+            char *filepath = malloc(len);
+            if (!filepath) continue;
+            snprintf(filepath, len, "%s/%s", dir, entry->d_name);
+            remove(filepath);
+            free(filepath);
+        }
+    }
+    closedir(dp);
+}
+
+char* get(DB* db, char* key) {
+    char* val = getValue(db->root, key);
+    if(val != NULL) {
+        return val;
+    }
+
+    return searchSSTables(key);
 }

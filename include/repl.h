@@ -4,7 +4,7 @@
 
 // void setValueCmd(Node** root, char* s, char* v);
 
-void getValueCmd(Node* root, char* s);
+void getValueCmd(DB* db, char* s);
 
 void repl(DB* db);
 

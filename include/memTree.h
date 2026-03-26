@@ -27,4 +27,6 @@ void inorder(Node* root);
 
 char* getValue(Node* root, char* key);
 
+void FreeTree(Node* root);
+
 #endif
