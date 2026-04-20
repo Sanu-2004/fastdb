@@ -20,7 +20,7 @@ DB *createEmptyDB()
 
 void insert(DB *db, char *key, char *val)
 {
-    db->size += sizeof(key) + sizeof(val);
+    db->size += (int)(strlen(key) + strlen(val));
     fprintf(db->wal, "SET %s %s\n", key, val);
     fflush(db->wal);
     insertTree(&(db->root), key, val);
@@ -71,12 +71,28 @@ FILE *getRecentWalFile(const char *dir)
     }
     closedir(dp);
 
-    FILE *wal = fopen(latest, "a+");
+    if (!latest)
+        return NULL;
+
+    size_t pathLen = strlen(dir) + strlen(latest) + 2;
+    char *path = (char *)malloc(pathLen);
+    if (!path)
+    {
+        free(latest);
+        return NULL;
+    }
+    snprintf(path, pathLen, "%s/%s", dir, latest);
+
+    FILE *wal = fopen(path, "a+");
+    free(path);
+    free(latest);
     if (!wal)
     {
         perror("fopen");
         return NULL;
     }
+
+    rewind(wal);
     return wal;
 }
 
@@ -107,15 +123,24 @@ void restoreTree(DB *db, FILE *wal)
 {
     char *buffer = NULL;
     size_t len = 0;
-    char *saveptr;
+
+    rewind(wal);
     while (getline(&buffer, &len, wal) != -1)
     {
+        char *saveptr = NULL;
         char *cmd = strtok_r(buffer, " \n", &saveptr);
+        if (!cmd)
+            continue;
+
         if (strcmp(cmd, "SET") == 0)
         {
             char *key = strtok_r(NULL, " ", &saveptr);
             char *val = strtok_r(NULL, "\n", &saveptr);
-            db->size += sizeof(key) + sizeof(val);
+
+            if (!key || !val)
+                continue;
+
+            db->size += (int)(strlen(key) + strlen(val));
             insertTree(&(db->root), key, val);
         }
     }
@@ -146,5 +171,5 @@ char* get(DB* db, char* key) {
         return val;
     }
 
-    return searchSSTables(key);
+    return lookIntoSSTables(key);
 }

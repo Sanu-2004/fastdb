@@ -45,47 +45,64 @@ void rightRotate(Node** root, Node* y) {
 }
 
 void fixInsert(Node** root, Node* node) {
-    while(node != *root && node->parent->color == RED) {
+    while (node != *root && node->parent && node->parent->color == RED) {
         Node* parent = node->parent;
         Node* grandParent = parent->parent;
 
-        if(parent == grandParent->left) {
+        if (!grandParent)
+            break;
+
+        if (parent == grandParent->left) {
             Node* uncle = grandParent->right;
 
-            if(uncle && uncle->color == RED) {
+            if (uncle && uncle->color == RED) {
                 parent->color = BLACK;
                 uncle->color = BLACK;
                 grandParent->color = RED;
                 node = grandParent;
             } else {
-                if(node == parent->right){
+                if (node == parent->right) {
                     node = parent;
                     leftRotate(root, node);
+                    parent = node->parent;
+                    grandParent = parent ? parent->parent : NULL;
                 }
-                parent->color = BLACK;
-                grandParent->color = RED;
-                rightRotate(root, grandParent);
+
+                if (parent)
+                    parent->color = BLACK;
+                if (grandParent) {
+                    grandParent->color = RED;
+                    rightRotate(root, grandParent);
+                }
             }
         } else {
             Node* uncle = grandParent->left;
 
-            if(uncle && uncle->color == RED) {
+            if (uncle && uncle->color == RED) {
                 parent->color = BLACK;
                 uncle->color = BLACK;
                 grandParent->color = RED;
                 node = grandParent;
             } else {
-                if(node == parent->left) {
+                if (node == parent->left) {
                     node = parent;
                     rightRotate(root, node);
+                    parent = node->parent;
+                    grandParent = parent ? parent->parent : NULL;
                 }
-                parent->color = BLACK;
-                grandParent->color = RED;
-                leftRotate(root, grandParent);
+
+                if (parent)
+                    parent->color = BLACK;
+                if (grandParent) {
+                    grandParent->color = RED;
+                    leftRotate(root, grandParent);
+                }
             }
         }
     }
-    (*root)->color = BLACK;
+
+    if (*root)
+        (*root)->color = BLACK;
 }
 
 void insertTree(Node** root, char* key, char* val) {

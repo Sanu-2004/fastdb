@@ -2,20 +2,42 @@
 #define SSTABLE_H
 #include<db.h>
 #include<config.h>
+#include<stdbool.h>
 
 typedef struct Footer {
     long long index_offset;
-    long long total_entries;
+    bool isSparse;
+    long long indexSize;
 } Footer;
+
+typedef struct indexList {
+    long long* key_offset;
+    int ptr;
+    int level;
+    struct indexList* next;
+} indexList;
+
+indexList* createIndexList(int level);
+
+void freeIndexList(indexList* list);
+
+void writeIndexListToFile(indexList* list, FILE* file, bool forceWriteLastNode);
 
 void createFoldertructure();
 
 void createSSTable(DB* db);
 
-void writeNodeToSSTable(Node* node, FILE* sstable, long long* line, long long* offsets);
+void writeNodeToSSTable(Node* node, FILE* sstable, long long* line, indexList* indexHead);
 
-char* readValueFromSSTable(FILE* sstable, long long* indexs, const char* key, long long left, long long right);
+char* searchValueFromSSTable(FILE* sstable, long long* indexs, const char* key, bool isSparse, long long left, long long right);
 
-char* searchSSTables(const char* key);
+
+char* lookIntoSSTables(const char* key);
+
+int sstableCount(const char* dir);
+
+void compactSSTables(int level);
+
+void mergeSSTables(int level, char* file1, char* file2);
 
 #endif

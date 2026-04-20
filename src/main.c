@@ -26,9 +26,18 @@ void insertTestData(DB* db, int count) {
 int main(){
     DB* db = createEmptyDB();
 
-    insertTestData(db, 11);
+    insertTestData(db, 4*1024);
 
-    repl(db);
+    printf("Inserted test data. Now looking up 'SANU'...\n");
+
+    // repl(db);
+    char *value = get(db, "SANU");
+    if (value) {
+        printf("Found value for 'SANU': %s\n", value);
+        free(value);
+    } else {
+        printf("Key 'SANU' not found.\n");
+    }
 
     return 0;
 }

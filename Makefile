@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -Iinclude
+CFLAGS = -Wall -Wextra -Iinclude -g -O0
 BUILD_DIR = build
 SRC_DIR = src
 OBJ_DIR = $(BUILD_DIR)/obj
