@@ -97,7 +97,7 @@ typedef struct FastDBRange {
 
 typedef struct FastDBStats {
     uint64_t revision;
-    /* Current in-memory entries. LSM includes active tombstones and excludes SSTables. */
+    /* Current in-memory entries, including active and frozen LSM tombstones. */
     size_t record_count;
     /* Charged bytes, including reserved persistent storage workspace. */
     size_t memory_bytes;
@@ -123,6 +123,9 @@ FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastD
 /* Set after selecting LSM storage. A zero workspace cap uses available engine memory. */
 FASTDB_API FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
                                                       const FastDBCompactionOptions *settings);
+/* LSM only. A nonzero active-tree byte threshold enables one background flush worker. */
+FASTDB_API FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options,
+                                                               size_t memtable_bytes);
 FASTDB_API FastDBStatus fastdb_open(const FastDBOptions *options, FastDB **out);
 /* Quiesce operations before closing. BUSY leaves the handle open. Other results consume it. */
 FASTDB_API FastDBStatus fastdb_close(FastDB *db);

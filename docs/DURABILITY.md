@@ -67,8 +67,10 @@ WAL prefix through a specific revision. The cut must end at a segment
 boundary. The edit retires only covered generations and keeps the newer
 WAL entries and active descriptor. Recovery starts at the verified table
 coverage and replays the newer WALs in order, even when their segment
-boundaries advanced the catalog revision high-water during rotation. The
-public flush path still uses the synchronous publisher on the active tree.
+boundaries advanced the catalog revision high-water during rotation. When
+enabled, the flush worker uses this path and holds the frozen tree through
+durable publication. The synchronous flush path handles manual requests and
+retries after a known background error.
 
 Serial compaction keeps read access to the original SSTables while building
 its outputs. It reserves durable IDs, writes and syncs every temporary output,
@@ -100,5 +102,5 @@ covered WALs in one edit. The live tree stays in RAM. Checkpoints run on
 request and before rotating beyond the configured WAL segment count.
 
 See the [implementation ledger](../PROGRESS.md) for executed fault and
-process-kill tests. Background LSM work and power-loss validation remain
+process-kill tests. Background compaction and power-loss validation remain
 pending.

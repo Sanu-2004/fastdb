@@ -280,3 +280,21 @@ test "$(printf 'get 6b\n' | docker run --rm -i --network none -v "$lsm:/data" "$
 test "$(printf 'put 6b 00ff\ncheckpoint\nput 77616c -\n' | docker run --rm -i --network none -v "$persistent:/data" "$image" --memory-persistent /data)" = "$(printf 'OK\nOK\nOK')"
 test "$(printf 'get 6b\nget 77616c\n' | docker run --rm -i --network none -v "$persistent:/data" "$image" --memory-persistent /data)" = "$(printf 'VALUE 1 00ff\nVALUE 2 -')"
 ```
+
+## Background flush worker
+
+V034 reran the starting checkpoint in `/tmp/fastdb-resume` with GCC Debug
+and passed 21 of 21. V035 initially failed the memory-mode 512-byte budget
+test because every handle carried the worker state. A separate allocation
+on enabled LSM handles restored the previous test behavior without changing
+the assertions. V036 used the same GCC, Clang and ASan/UBSan/LSan commands
+above with `fastdb-bg-$profile` as the build directory. Each profile passed
+22 of 22.
+
+`fastdb_background_flush` pauses the worker at SSTable construction while
+the foreground checks a frozen revision with CAS, writes a tombstone, and
+rotates the newer WAL. It also checks saturation at one frozen tree,
+explicit retry after ENOSPC, safe active-tree retention after a failed WAL
+rotation, and clean close during output construction. A subprocess case
+acknowledges both WAL ranges, kills the process during construction and
+reopens with all seven revisions and the tombstone intact.

@@ -135,6 +135,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->path = NULL;
         options->mode = mode;
         options->storage = (FastDBPersistentOptions){0};
+        options->flush_threshold = 0;
         fastdb_compaction_options_default(&options->compaction);
         return FASTDB_OK;
     }
@@ -143,8 +144,10 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         return FASTDB_INVALID_ARGUMENT;
     FastDBOptions next = *options;
     next.mode = mode;
-    if (mode != options->mode)
+    if (mode != options->mode) {
         fastdb_compaction_options_default(&next.compaction);
+        next.flush_threshold = 0;
+    }
     if (settings == NULL)
         fastdb_persistent_options_default(&next.storage);
     else
@@ -160,6 +163,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->mode = mode;
     options->storage = next.storage;
     options->compaction = next.compaction;
+    options->flush_threshold = next.flush_threshold;
     return FASTDB_OK;
 }
 
@@ -174,6 +178,84 @@ FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
     if (status == FASTDB_OK)
         options->compaction = *settings;
     return status;
+}
+
+FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options, size_t memtable_bytes)
+{
+    if (options == NULL || options->mode != FASTDB_MODE_LSM)
+        return FASTDB_INVALID_ARGUMENT;
+    FastDBOptions candidate = *options;
+    candidate.flush_threshold = memtable_bytes;
+    FastDBStatus status = fdb_disk_validate(&candidate);
+    if (status == FASTDB_OK)
+        options->flush_threshold = memtable_bytes;
+    return status;
+}
+
+static FastDBStatus flush_immutable(FastDB *db)
+{
+    FastDBStatus status = fdb_disk_rotate_wal(db->disk);
+    if (status != FASTDB_OK)
+        return status;
+    FDBBackgroundFlush *flush = db->flush;
+    flush->frozen = db->tree;
+    flush->frozen_sequence = db->sequence;
+    db->tree = (FDBTree){0};
+
+    FDBFlushOutput output = {.sequence = flush->frozen_sequence};
+    status = fdb_disk_flush_reserve(db->disk, &output);
+    if (status == FASTDB_OK) {
+        pthread_mutex_unlock(&db->mutex);
+        status = fdb_disk_flush_build(db->disk, &flush->frozen, &output);
+        pthread_mutex_lock(&db->mutex);
+    }
+    if (status == FASTDB_OK)
+        status = fdb_disk_flush_commit(db->disk, &flush->frozen, &output);
+    fdb_flush_dispose(&output);
+    if (status == FASTDB_OK)
+        status = fdb_disk_compact(db->disk, false, NULL, write_headroom(db));
+    return status;
+}
+
+static void *flush_worker(void *arg)
+{
+    FastDB *db = arg;
+    FDBBackgroundFlush *flush = db->flush;
+    pthread_mutex_lock(&db->mutex);
+    while (!flush->stopping) {
+        if (flush->error != FASTDB_OK || flush->waiters != 0 || db->tree.bytes < flush->threshold) {
+            pthread_cond_wait(&flush->condition, &db->mutex);
+            continue;
+        }
+        flush->error = flush_immutable(db);
+        pthread_cond_broadcast(&flush->condition);
+    }
+    pthread_mutex_unlock(&db->mutex);
+    return NULL;
+}
+
+static FastDBStatus start_flush_worker(FastDB *db, size_t threshold)
+{
+    if (threshold == 0)
+        return FASTDB_OK;
+    FDBBackgroundFlush *flush = calloc(1, sizeof(*flush));
+    if (flush == NULL)
+        return FASTDB_OUT_OF_MEMORY;
+    int error = pthread_cond_init(&flush->condition, NULL);
+    if (error != 0) {
+        free(flush);
+        return error == ENOMEM ? FASTDB_OUT_OF_MEMORY : FASTDB_IO_ERROR;
+    }
+    flush->threshold = threshold;
+    db->flush = flush;
+    error = pthread_create(&flush->worker, NULL, flush_worker, db);
+    if (error != 0) {
+        db->flush = NULL;
+        pthread_cond_destroy(&flush->condition);
+        free(flush);
+        return error == ENOMEM ? FASTDB_OUT_OF_MEMORY : FASTDB_IO_ERROR;
+    }
+    return FASTDB_OK;
 }
 
 FastDBStatus fdb_open_with_fs(const FastDBOptions *options, const FDBFs *fs, FastDB **out)
@@ -193,7 +275,10 @@ FastDBStatus fdb_open_with_fs(const FastDBOptions *options, const FDBFs *fs, Fas
     if (options != NULL && options->path != NULL) {
         const FDBWalReplay replay = {replay_frame, db, replay_headroom};
         FastDBStatus status = fdb_disk_open(db, options, fs, &replay, restore_checkpoint);
+        if (status == FASTDB_OK)
+            status = start_flush_worker(db, options->flush_threshold);
         if (status != FASTDB_OK) {
+            (void)fdb_disk_close(db->disk);
             fdb_tree_destroy(&db->tree);
             pthread_mutex_destroy(&db->mutex);
             free(db);
@@ -215,17 +300,33 @@ FastDBStatus fastdb_close(FastDB *db)
         return FASTDB_INVALID_ARGUMENT;
     if (db->iterator_count != 0)
         return FASTDB_BUSY;
+    FastDBStatus maintenance = FASTDB_OK;
+    FDBBackgroundFlush *flush = db->flush;
+    if (flush != NULL) {
+        pthread_mutex_lock(&db->mutex);
+        flush->stopping = true;
+        pthread_cond_broadcast(&flush->condition);
+        pthread_mutex_unlock(&db->mutex);
+        if (pthread_join(flush->worker, NULL) != 0)
+            return FASTDB_BUSY;
+        maintenance = flush->error;
+        pthread_cond_destroy(&flush->condition);
+        fdb_tree_destroy(&flush->frozen);
+        free(flush);
+        db->flush = NULL;
+    }
     if (pthread_mutex_destroy(&db->mutex) != 0)
         return FASTDB_BUSY;
     FastDBStatus status = fdb_disk_close(db->disk);
     fdb_tree_destroy(&db->tree);
     free(db);
-    return status;
+    return status == FASTDB_OK ? maintenance : status;
 }
 
 size_t fdb_memory_bytes(const FastDB *db)
 {
-    return sizeof(*db) + db->tree.bytes + db->iterator_bytes;
+    size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
+    return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes;
 }
 
 FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out)
@@ -234,8 +335,10 @@ FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out)
         return FASTDB_INVALID_ARGUMENT;
     pthread_mutex_lock(&db->mutex);
     FastDBStatus status = fdb_disk_poisoned(db->disk) ? FASTDB_COMMIT_UNCERTAIN : FASTDB_OK;
+    size_t frozen_count = db->flush == NULL ? 0 : db->flush->frozen.count;
     *out = status != FASTDB_OK ? (FastDBStats){0} :
-           (FastDBStats){db->sequence, db->tree.count, fdb_memory_bytes(db) + db->disk_budget,
+           (FastDBStats){db->sequence, db->tree.count + frozen_count,
+                         fdb_memory_bytes(db) + db->disk_budget,
                          db->iterator_bytes, db->iterator_count};
     pthread_mutex_unlock(&db->mutex);
     return status;
@@ -246,9 +349,24 @@ FastDBStatus fastdb_flush(FastDB *db)
     if (db == NULL)
         return FASTDB_INVALID_ARGUMENT;
     pthread_mutex_lock(&db->mutex);
-    FastDBStatus status = fdb_disk_flush(db->disk, &db->tree);
+    FDBBackgroundFlush *flush = db->flush;
+    FastDBStatus status = FASTDB_OK;
+    if (flush != NULL) {
+        ++flush->waiters;
+        while (flush->frozen.count != 0 && flush->error == FASTDB_OK)
+            pthread_cond_wait(&flush->condition, &db->mutex);
+        --flush->waiters;
+        if (flush->frozen.count != 0)
+            status = fdb_disk_retry_frozen(db->disk, &flush->frozen, flush->frozen_sequence);
+    }
+    if (status == FASTDB_OK)
+        status = fdb_disk_flush(db->disk, &db->tree);
     if (status == FASTDB_OK)
         status = fdb_disk_compact(db->disk, false, NULL, write_headroom(db));
+    if (flush != NULL) {
+        flush->error = status;
+        pthread_cond_broadcast(&flush->condition);
+    }
     pthread_mutex_unlock(&db->mutex);
     return status;
 }
@@ -261,7 +379,12 @@ FastDBStatus fastdb_compact_range(FastDB *db, const FastDBRange *range)
     if (status != FASTDB_OK)
         return status;
     pthread_mutex_lock(&db->mutex);
-    status = fdb_disk_compact(db->disk, true, range, write_headroom(db));
+    if (fdb_disk_poisoned(db->disk))
+        status = FASTDB_COMMIT_UNCERTAIN;
+    else if (db->flush != NULL && db->flush->frozen.count != 0 && db->flush->error == FASTDB_OK)
+        status = FASTDB_BUSY;
+    else
+        status = fdb_disk_compact(db->disk, true, range, write_headroom(db));
     pthread_mutex_unlock(&db->mutex);
     return status;
 }
@@ -342,8 +465,10 @@ static FastDBStatus lookup(const FastDB *db, FastDBSlice key, bool copy, FDBLook
     if (fdb_disk_poisoned(db->disk))
         return FASTDB_COMMIT_UNCERTAIN;
     const FDBNode *node = fdb_tree_get(&db->tree, key);
+    if (node == NULL && db->flush != NULL)
+        node = fdb_tree_get(&db->flush->frozen, key);
     FastDBStatus status = FASTDB_OK;
-    /* Every active revision is newer than all flushed revisions. */
+    /* The active tree is newer than the frozen tree, and both are newer than disk. */
     if (node != NULL)
         status = fdb_lookup_record(&node->record, copy, out);
     else if (fdb_disk_has_tables(db->disk))
@@ -418,6 +543,11 @@ static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique
             return FASTDB_LIMIT_EXCEEDED;
         spare -= write->bytes;
     }
+    /* Before the frozen table is durable, recovery replays both trees into one. */
+    if (db->flush != NULL &&
+        (!fdb_add_size(keys, db->flush->frozen.count, &keys) ||
+         !fdb_add_size(key_bytes, db->flush->frozen.key_bytes, &key_bytes)))
+        return FASTDB_LIMIT_EXCEEDED;
     if (!fdb_disk_tree_fits(db->disk, keys, key_bytes))
         return FASTDB_LIMIT_EXCEEDED;
 
@@ -577,8 +707,16 @@ static FastDBStatus commit(FastDB *db, const Operation *op)
     pthread_mutex_lock(&db->mutex);
     size_t mutations;
     FastDBStatus status = preflight(db, op, &mutations);
-    if (status == FASTDB_OK && mutations != 0)
-        status = commit_writes(db, op, mutations);
+    if (status == FASTDB_OK && mutations != 0) {
+        FDBBackgroundFlush *flush = db->flush;
+        if (flush != NULL && db->tree.bytes >= flush->threshold &&
+            (flush->frozen.count != 0 || flush->error != FASTDB_OK))
+            status = flush->error == FASTDB_OK ? FASTDB_BUSY : flush->error;
+        else
+            status = commit_writes(db, op, mutations);
+        if (status == FASTDB_OK && flush != NULL)
+            pthread_cond_signal(&flush->condition);
+    }
     pthread_mutex_unlock(&db->mutex);
     return status;
 }

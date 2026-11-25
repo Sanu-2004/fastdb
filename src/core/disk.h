@@ -2,6 +2,7 @@
 #define FASTDB_DISK_H
 
 #include "engine.h"
+#include "flush.h"
 #include "storage/sstable.h"
 #include "wal.h"
 
@@ -27,6 +28,11 @@ FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t cou
 FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
                            bool copy, FDBLookup *out);
 FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree);
+FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequence);
+FastDBStatus fdb_disk_rotate_wal(FDBDisk *disk);
+FastDBStatus fdb_disk_flush_reserve(FDBDisk *disk, FDBFlushOutput *output);
+FastDBStatus fdb_disk_flush_build(const FDBDisk *disk, const FDBTree *tree, FDBFlushOutput *output);
+FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushOutput *output);
 FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *range, size_t headroom);
 FastDBStatus fdb_disk_checkpoint(FDBDisk *disk, FDBTree *tree);
 FastDBStatus fdb_disk_maybe_checkpoint(FDBDisk *disk, FDBTree *tree, size_t frame_bytes);

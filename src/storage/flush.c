@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct FlushCut {
     size_t wal_boundary;
@@ -52,14 +53,18 @@ static FastDBStatus make_edit(const FDBWalSet *set, const FDBSSTProperties *prop
     next->view.count = entries;
     next->view.entries = next->entries;
     unsigned char *key_position = next->image;
-    size_t count = 0;
+    size_t count = 0, added_index = 0;
     for (size_t i = 0; i < current->count; ++i) {
         if (keep_entry(&current->entries[i], i, cut)) {
+            if (current->entries[i].id < props->id)
+                ++added_index;
             next->entries[count] = current->entries[i];
             fdb_manifest_copy_bounds(&next->entries[count++], &key_position);
         }
     }
-    FDBManifestEntry *added = &next->entries[count];
+    memmove(&next->entries[added_index + 1], &next->entries[added_index],
+            (count - added_index) * sizeof(*next->entries));
+    FDBManifestEntry *added = &next->entries[added_index];
     *added = (FDBManifestEntry){
         .id = props->id, .kind = cut->checkpoint ? FDB_FILE_CHECKPOINT : FDB_FILE_SSTABLE,
         .bytes = props->file_bytes, .sequence_begin = props->min_sequence,
@@ -126,37 +131,72 @@ static FastDBStatus select_wal_boundary(const FDBWalSet *set, FlushCut *cut)
     return FASTDB_INVALID_ARGUMENT;
 }
 
-static FastDBStatus publish_table(FDBWalSet *set, FDBTree *tree, const FDBSSTLimits *limits,
-                                    uint64_t id, const FlushCut *cut)
+FastDBStatus fdb_flush_build(const FDBDirectory *dir, const FDBSSTLimits *limits,
+                              const FDBTree *tree, FDBFlushOutput *output)
 {
-    char target[sizeof("sst-18446744073709551615")];
     char temp[sizeof(".sst-18446744073709551615.tmp")];
-    const char *prefix = cut->checkpoint ? "chk" : "sst";
-    (void)snprintf(target, sizeof(target), "%s-%020" PRIu64, prefix, id);
-    (void)snprintf(temp, sizeof(temp), ".%s-%020" PRIu64 ".tmp", prefix, id);
-    FDBSSTWriter *writer;
-    FastDBStatus status = fdb_sst_writer_open(set->dir, temp, id, limits, &writer);
-    if (status != FASTDB_OK)
-        return status;
-    FDBSSTProperties props;
-    FDBManifestLoad next = {0};
-    status = write_tree(writer, tree, cut->checkpoint, &props);
+    const char *prefix = output->checkpoint ? "chk" : "sst";
+    (void)snprintf(temp, sizeof(temp), ".%s-%020" PRIu64 ".tmp", prefix, output->id);
+    FastDBStatus status = fdb_sst_writer_open(dir, temp, output->id, limits, &output->writer);
+    return status == FASTDB_OK ? write_tree(output->writer, tree, output->checkpoint,
+                                            &output->properties) : status;
+}
+
+void fdb_flush_dispose(FDBFlushOutput *output)
+{
+    /* A finished writer is already closed, and build reports any error. */
+    (void)fdb_sst_writer_destroy(output->writer);
+    *output = (FDBFlushOutput){0};
+}
+
+FastDBStatus fdb_flush_commit(FDBWalSet *set, FDBTree *tree, const FDBFlushOutput *output)
+{
+    if (set->poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    FlushCut cut = {.sequence = output->sequence, .checkpoint = output->checkpoint};
+    const FDBManifestEntry *first = first_wal(set);
+    if (first == NULL || set->catalog.view.generation == UINT64_MAX)
+        return first == NULL ? FASTDB_CORRUPTION : FASTDB_LIMIT_EXCEEDED;
+    cut.prior_sequence = first->sequence_begin;
+    FastDBStatus status = cut.checkpoint ? FASTDB_OK : select_wal_boundary(set, &cut);
     if (status == FASTDB_OK) {
-        bool covered = cut->checkpoint ? props.max_sequence <= cut->sequence &&
-                                         props.tombstones == 0 :
-                       props.max_sequence == cut->sequence && props.min_sequence > cut->prior_sequence;
-        status = covered ? make_edit(set, &props, cut, &next) : FASTDB_CORRUPTION;
+        const FDBSSTProperties *props = &output->properties;
+        bool covered = cut.checkpoint ? props->max_sequence <= cut.sequence && props->tombstones == 0 :
+                       props->max_sequence == cut.sequence && props->min_sequence > cut.prior_sequence;
+        if (!covered)
+            status = FASTDB_CORRUPTION;
     }
-    FastDBStatus close_status = fdb_sst_writer_destroy(writer);
+    FDBManifestLoad next = {0};
     if (status == FASTDB_OK)
-        status = close_status;
-    if (status == FASTDB_OK)
+        status = make_edit(set, &output->properties, &cut, &next);
+    if (status == FASTDB_OK) {
+        char target[sizeof("sst-18446744073709551615")];
+        char temp[sizeof(".sst-18446744073709551615.tmp")];
+        const char *prefix = cut.checkpoint ? "chk" : "sst";
+        (void)snprintf(target, sizeof(target), "%s-%020" PRIu64, prefix, output->id);
+        (void)snprintf(temp, sizeof(temp), ".%s-%020" PRIu64 ".tmp", prefix, output->id);
         status = fdb_dir_rename_new(set->dir, temp, target);
+    }
     if (status == FASTDB_OK)
         status = fdb_dir_sync(set->dir);
     if (status == FASTDB_OK)
-        status = install_edit(set, tree, cut->checkpoint, &next);
+        status = install_edit(set, tree, cut.checkpoint, &next);
     fdb_manifest_release(&next);
+    if (status == FASTDB_COMMIT_UNCERTAIN)
+        set->poisoned = true;
+    return status;
+}
+
+FastDBStatus fdb_flush_reserve(FDBWalSet *set, FDBFlushOutput *output)
+{
+    if (set->poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    if (set->catalog.view.generation >= UINT64_MAX - 1)
+        return FASTDB_LIMIT_EXCEEDED;
+    FastDBStatus status = fdb_manifest_reserve_file(set->dir, &set->catalog_limits,
+                                                   &set->catalog.view, &output->id);
+    if (status == FASTDB_COMMIT_UNCERTAIN)
+        set->poisoned = true;
     return status;
 }
 
@@ -177,21 +217,18 @@ static FastDBStatus flush(FDBWalSet *set, FDBTree *tree, const FDBSSTLimits *lim
         return FASTDB_OK;
     if (entry == NULL || !fdb_sst_valid_limits(limits))
         return FASTDB_INVALID_ARGUMENT;
-    if (set->catalog.view.generation >= UINT64_MAX - 1)
-        return FASTDB_LIMIT_EXCEEDED;
-    cut.prior_sequence = entry->sequence_begin;
     if (!cut.checkpoint) {
         FastDBStatus selected = select_wal_boundary(set, &cut);
         if (selected != FASTDB_OK)
             return selected;
     }
-    uint64_t id;
-    FastDBStatus status = fdb_manifest_reserve_file(set->dir, &set->catalog_limits,
-                                                   &set->catalog.view, &id);
+    FDBFlushOutput output = {.sequence = cut.sequence, .checkpoint = cut.checkpoint};
+    FastDBStatus status = fdb_flush_reserve(set, &output);
     if (status == FASTDB_OK)
-        status = publish_table(set, tree, limits, id, &cut);
-    if (status == FASTDB_COMMIT_UNCERTAIN)
-        set->poisoned = true;
+        status = fdb_flush_build(set->dir, limits, tree, &output);
+    if (status == FASTDB_OK)
+        status = fdb_flush_commit(set, tree, &output);
+    fdb_flush_dispose(&output);
     return status;
 }
 

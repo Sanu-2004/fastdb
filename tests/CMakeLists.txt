@@ -55,6 +55,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     fastdb_test(fastdb_compaction native/compaction.c fastdb_static "integration;recovery")
     target_include_directories(fastdb_compaction PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
         "${PROJECT_SOURCE_DIR}/src/storage")
+    fastdb_test(fastdb_background_flush native/background_flush.c fastdb_static
+        "integration;concurrency;recovery;fault")
+    target_include_directories(fastdb_background_flush PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
+        "${PROJECT_SOURCE_DIR}/src/storage")
 endif()
 
 add_test(NAME fastdb_cli COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/cli.sh" $<TARGET_FILE:fastdb-cli>)

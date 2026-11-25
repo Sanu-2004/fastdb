@@ -53,6 +53,22 @@ database can return `FASTDB_LIMIT_EXCEEDED` even after checkpointing because
 it retains every live record in memory. LSM supports manual flush to release
 its memtable.
 
+After selecting LSM, `fastdb_options_set_lsm_flush_threshold(options, bytes)`
+enables one background flush worker when `bytes` is nonzero. The default
+zero keeps manual flush available without a worker. The threshold measures
+allocated active-tree node bytes. A full batch can take the tree above the
+threshold. Reopen to change the setting. The worker adds a fixed state
+allocation and reserves a writer and reader workspace for concurrent I/O.
+
+While the one frozen slot is occupied, writes into a new active tree can
+continue within the memory and metadata budgets. Writes return `FASTDB_BUSY`
+when that tree reaches the threshold before the worker frees the slot. The
+combined key metadata must also fit one replay tree, since recovery can see
+both WAL ranges before the frozen table is installed. A background error
+pauses automatic work and is returned by close or a write that needs the slot.
+For a known failure, explicit `fastdb_flush` retries the frozen work. Reopen
+after `FASTDB_COMMIT_UNCERTAIN`.
+
 Initialize `FastDBCompactionOptions` with `fastdb_compaction_options_default`
 and set them with `fastdb_options_set_compaction` after selecting LSM storage.
 The settings take effect on reopen. Choose a level count that covers all
@@ -84,8 +100,9 @@ also processes overlapping destination files. The lower bound is inclusive
 unless `start_exclusive` is set. The upper bound is exclusive. Null/zero
 bounds are open and equal nonempty bounds select no files. Active data can
 be flushed separately. Compaction remains synchronous. A flush can report a
-compaction error after its L0 table is durable. Size-tiered compaction,
-background scheduling and history garbage collection are pending.
+compaction error after its L0 table is durable. The flush worker can also
+invoke the serial scheduler after publication. Size-tiered compaction,
+background compaction and history garbage collection are pending.
 
 The engine uses no automatic eviction. Workspace charges describe
 engine-requested allocations and reserved capacity. See

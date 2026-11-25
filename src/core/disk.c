@@ -20,6 +20,7 @@ struct FDBDisk {
     FDBCompactionPolicy policy;
     size_t reader_bytes;
     size_t writer_bytes;
+    size_t table_workspace;
     bool compaction_cleanup_needed;
 };
 
@@ -123,16 +124,22 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     if (!fdb_sst_writer_budget(&disk->table, &writer) ||
         !fdb_sst_reader_budget(&disk->table, &reader) ||
         !catalog_budget(&disk->manifest, &catalog) ||
-        !fdb_add_size(sizeof(*disk), catalog, workspace) ||
-        !fdb_add_size(*workspace, writer > reader ? writer : reader, workspace))
+        !fdb_add_size(sizeof(*disk), catalog, workspace))
         return FASTDB_INVALID_ARGUMENT;
     disk->reader_bytes = reader;
     disk->writer_bytes = writer;
+    disk->table_workspace = writer > reader ? writer : reader;
+    if (options->flush_threshold != 0 &&
+        (options->mode != FASTDB_MODE_LSM || !fdb_add_size(reader, writer, &disk->table_workspace) ||
+         !fdb_add_size(*workspace, sizeof(FDBBackgroundFlush), workspace)))
+        return FASTDB_INVALID_ARGUMENT;
+    if (!fdb_add_size(*workspace, disk->table_workspace, workspace))
+        return FASTDB_INVALID_ARGUMENT;
     size_t smallest_node;
     size_t available = limits->max_memory_bytes - sizeof(FastDB);
     if (!fdb_node_size((FastDBSlice){.size = 1}, (FastDBSlice){0}, &smallest_node) ||
-        *workspace > available || smallest_node + FDB_WAL_FRAME_BYTES + FDB_RECORD_HEADER_BYTES + 1 >
-                                  available - *workspace)
+        *workspace > available || options->flush_threshold > available - *workspace ||
+        smallest_node + FDB_WAL_FRAME_BYTES + FDB_RECORD_HEADER_BYTES + 1 > available - *workspace)
         return FASTDB_INVALID_ARGUMENT;
     return FASTDB_OK;
 }
@@ -330,6 +337,37 @@ FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
+FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequence)
+{
+    if (disk->log.poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    FastDBStatus status = fdb_storage_reclaim_orphans(&disk->log);
+    if (status == FASTDB_OK)
+        status = fdb_flush_l0(&disk->log, tree, sequence, &disk->table);
+    return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
+}
+
+FastDBStatus fdb_disk_rotate_wal(FDBDisk *disk)
+{
+    return fdb_wal_set_rotate(&disk->log);
+}
+
+FastDBStatus fdb_disk_flush_reserve(FDBDisk *disk, FDBFlushOutput *output)
+{
+    return fdb_flush_reserve(&disk->log, output);
+}
+
+FastDBStatus fdb_disk_flush_build(const FDBDisk *disk, const FDBTree *tree, FDBFlushOutput *output)
+{
+    return fdb_flush_build(&disk->dir, &disk->table, tree, output);
+}
+
+FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushOutput *output)
+{
+    FastDBStatus status = fdb_flush_commit(&disk->log, tree, output);
+    return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
+}
+
 FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *range, size_t headroom)
 {
     if (!fdb_disk_has_tables(disk) || !disk->compaction.enabled)
@@ -343,9 +381,7 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
         disk->compaction_cleanup_needed = false;
     }
 
-    size_t table_workspace = disk->writer_bytes > disk->reader_bytes ?
-                             disk->writer_bytes : disk->reader_bytes;
-    size_t available = table_workspace + headroom;
+    size_t available = disk->table_workspace + headroom;
     size_t cap = disk->compaction.max_working_bytes;
     if (cap != 0 && cap < available)
         available = cap;

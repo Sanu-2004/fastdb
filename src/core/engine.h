@@ -11,9 +11,21 @@ struct FastDBOptions {
     char *path;
     FastDBPersistentOptions storage;
     FastDBCompactionOptions compaction;
+    size_t flush_threshold;
 };
 
 typedef struct FDBDisk FDBDisk;
+
+typedef struct FDBBackgroundFlush {
+    FDBTree frozen;
+    pthread_cond_t condition;
+    pthread_t worker;
+    size_t threshold;
+    size_t waiters;
+    uint64_t frozen_sequence;
+    FastDBStatus error;
+    bool stopping;
+} FDBBackgroundFlush;
 
 struct FastDB {
     pthread_mutex_t mutex;
@@ -24,6 +36,7 @@ struct FastDB {
     size_t iterator_count;
     FDBDisk *disk;
     size_t disk_budget;
+    FDBBackgroundFlush *flush;
 };
 
 typedef struct FDBScanRow {

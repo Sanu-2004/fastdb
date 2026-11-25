@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-25  
-**Last verified commit / branch:** `ca5a528bb4fe577a789667c48ed8670962f5e82a` / `main` with uncommitted native P3 and Docker changes (V026–V033). The archived baseline is V001–V002.
+**Last verified base commit / branch:** `0415f7d` / `main`. The background-flush increment is verified in V036. The archived `ca5a528` baseline is V001–V002.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
-**Next task:** P3.5 — capture coherent read views and add immutable memtable rotation and background flush.
+**Next task:** P3.5 — pin SSTable read views and delay obsolete-file deletion through publication.
 
 ## 1. How to use this file
 
@@ -98,7 +98,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P3.2 | K-way merge and bounded output splitting, file/metadata buffers and fan-in; tests for duplicate keys and errors. | DONE | V019–V021. Heap merge with reader/heap/writer workspace and fan-in limits, output count cap, key-group-preserving temporary output splitting and hard metadata limits. |
 | P3.3 | Leveled scheduler, overlap closure, L0 and L1+ invariants, byte thresholds, cascading and bottommost behavior. | DONE | V026–V028. Serial threshold selection, cascading, closed range checks, two-input overlap staging and terminal level behavior. [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
 | P3.4 | Manual range/full compaction and disabled mode; atomic manifest publication and safe reclamation. | DONE | V026–V028. Native and CLI maintenance, active WAL continuity, bounded admission, old input retention on failure, reopen, and nine compaction process-kill cases. Full maintenance promotes eligible tables to the last level and retains all history. |
-| P3.5 | Coherent read-view capture, pinned versions/files, active-to-immutable rotation and background flush worker(s). | IN_PROGRESS | V031 verifies the storage-level WAL prefix cut with newer segments retained. Native read-view pinning, tree rotation, the queue and workers remain open. |
+| P3.5 | Coherent read-view capture, pinned versions/files, active-to-immutable rotation and background flush worker(s). | IN_PROGRESS | V031 verifies the WAL prefix cut. V036 verifies the single frozen slot and background worker. SSTable read-view pinning is still open. |
 | P3.6 | Compaction worker(s), conflict reservations, commit revalidation, scheduling, safe failure/cancel/shutdown. | TODO | — |
 | P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | TODO | — |
 | P3.8 | Native snapshots and history retention across memtable and disk; atomic batch visibility; coherent merged scans. | TODO | — |
@@ -257,6 +257,8 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V032 | 2026-11-25 / final native image from V031 sources | `docker build --progress=plain -t fastdb-native:local .` plus non-root, install and separate-container volume smoke in native verification. | PASS | 21/21 Release tests. Both volume-based results matched V030. Image ID `sha256:88dbd09963626778bad1e7dc242d0ee588c4f92b302baaac467a93012ffd7d66`, Linux amd64. |
 | V033 | 2026-11-25 / final native P3 checkpoint | Clang `--analyze` over `src/core/*.c`, `src/storage/*.c`, and `cli/*.c` with the V022 command in native verification. | PASS | Exit 0 with no diagnostics. |
 | V034 | 2026-11-25 / Session 004 starting checkpoint | `cmake -S . -B /tmp/fastdb-resume -DCMAKE_BUILD_TYPE=Debug`, `cmake --build /tmp/fastdb-resume --parallel`, `ctest --test-dir /tmp/fastdb-resume --output-on-failure` in the read-only Debian toolchain container. | PASS | 21/21 before P3.5 engine changes. |
+| V035 | 2026-11-25 / first worker implementation | GCC Debug CMake build and CTest in `/tmp/fastdb-bg` in the same container. | FAIL | 20/21. The worker state embedded in each handle exhausted a previously supported 512-byte memory-mode budget. The state now uses a separate, charged allocation only for background LSM handles. |
+| V036 | 2026-11-25 / background-flush increment | GCC Debug, Clang Release and GCC ASan/UBSan/LSan, `/tmp/fastdb-bg-$profile`; see [native verification](docs/verification/NATIVE_CHECKPOINT.md). | PASS | 22/22 in each configuration. The worker test covers a later WAL rotation before publication, frozen lookup, CAS, tombstone masking, saturation, ENOSPC retry, failed-rotation rollback, close during work and recovery after SIGKILL. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -287,6 +289,7 @@ For stress/fuzz/benchmarks, log seed, operation counts, workload, duration, data
 | D006 | Complete atomic MANIFEST snapshots plus durable reservations before file creation | Accepted in [ADR 0002](docs/adr/0002-atomic-manifest.md). V008–V011. |
 | D007 | Native serial storage and persistent-memory checkpoint coverage separate from the newest live revision | Accepted in [ADR 0003](docs/adr/0003-serial-native-persistence.md). V019–V021. |
 | D008 | Oversized overlap closure promotes a bounded prefix while the suffix stays at its source level | Accepted in [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). Each job commits one catalog edit under the existing mutex. V026–V028. |
+| D009 | One optional background flush worker and one immutable slot per LSM database | Accepted in [ADR 0005](docs/adr/0005-single-immutable-flush-worker.md). Foreground writes can continue while the SSTable is built. A combined active/frozen metadata bound keeps WAL replay admissible. |
 
 Add new ADR links (`docs/adr/NNNN-title.md`) for consequential changes. An agent may refine implementation details but may not silently reduce required guarantees.
 
@@ -360,15 +363,21 @@ These are deliberate boundaries, not completed features:
 - Built the multi-stage native image in V029 and rebuilt it from the final sources in V032. V030 and V032 verified UID/GID 10001, the SDK files, an LSM reopen after flush and compact, and a persistent-memory reopen with both a checkpointed record and WAL records. All smoke data lived in temporary named volumes. Server and Studio have no runnable components yet. Their container stages, Compose and health checks remain within P7.10.
 - No commit was made. New work is in the root Docker files and README, native CLI/API/core/storage code, CMake tests and native documentation. The archived source and owner data were preserved.
 
+### Session 004 — 2026-11-25 — Background flush and read views
+
+- The uncommitted native checkpoint passed 21/21 on resume (V034). Committed and pushed `0415f7d` to `origin/main` before modifying the engine for P3.5.
+- The first worker build exposed a memory-mode budget regression (V035). Moved worker state out of handles that use synchronous maintenance and reran the existing budget test with its original assertions.
+- V036 verified the optional worker with the full GCC, Clang and sanitizer suites. The gate-controlled worker test demonstrates writes during table construction, active WAL rotation, backpressure, retry, and clean or interrupted shutdown. See D009.
+
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
 - **Next task ID:** P3.5.
-- **Next action:** In `src/core/engine.c` and `src/core/disk.c`, introduce a bounded immutable memtable slot and capture active and immutable tables plus a pinned SSTable catalog under `FastDB.mutex`. With injected I/O failure, a failed WAL rotation must keep the current tree active. On a successful rotation, preserve the frozen tree through durable `fdb_flush_l0` publication. Start with one flush worker, reorder output I/O and catalog publication so the mutex is held only for shared state transitions, and defer `fdb_storage_reclaim_orphans` until readers release the retired view. Test a read held across freeze/publication and newer writes masking frozen entries. The sealed-prefix publisher and WAL descriptor rebasing are already verified in `tests/native/flush.c`.
+- **Next action:** In `src/core/engine.c` and `src/core/disk.c`, capture a bounded SSTable read view under `FastDB.mutex` and protect its files from `fdb_storage_reclaim_orphans` while a point reader runs outside the mutex. Keep CAS checks under the writer lock. Test a stalled table read that crosses compaction publication and assert that the old file remains until the read releases its view.
 - **Next commands:** Run `make test` and `make test-recovery` with disposable directories after the first engine-level freeze change. Use the compiler and sanitizer commands in [native verification](docs/verification/NATIVE_CHECKPOINT.md). Keep pinned reader and rotation failure tests with the other native recovery fixtures.
-- **Last verified good checkpoint:** All three public storage modes, offline canonical-WAL export, serial leveled compaction, internal sealed WAL prefix cuts and the native Docker image. GCC, Clang and ASan/UBSan/LSan each passed 21/21. Docker Release also passed 21/21 and both persistent volume checks passed.
-- **Working-tree state:** `main` remains at the original commit. Uncommitted work includes CMake, CLI, native core/storage, tests, documentation and contracts. No owner data was opened in tests.
+- **Last verified good checkpoint:** All three public storage modes, offline canonical-WAL export, serial leveled compaction and the optional LSM background flush worker. GCC, Clang and ASan/UBSan/LSan each passed 22/22. The preceding native Docker checkpoint passed 21/21 plus both persistent volume checks.
+- **Working-tree state:** `0415f7d` is on `origin/main`. This increment changes the native engine, L0 publication, tests and documentation. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.5 can proceed locally with normal builds and other sanitizers.
-- **Critical limits:** LSM flush and compaction run under the database mutex. A flush can report a compaction failure after the flush is durable. Workers, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
+- **Critical limits:** Worker table construction runs outside the mutex. Table reads, catalog publication, explicit flush and compaction still hold it. Size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

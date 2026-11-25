@@ -16,7 +16,10 @@ Fresh database handles start independent incarnations with revision zero.
 
 The memory modes hold the latest live record for each key. Replacing and
 deleting a record releases its previous node immediately. LSM retains active
-tombstones until a flush writes them to disk. An atomic batch evaluates
+tombstones until a flush writes them to disk. With background flush enabled,
+LSM moves the active tree into one immutable slot after durably rotating its
+WAL. The foreground can then append to a fresh active tree and WAL while the
+worker writes the immutable tree's SSTable. An atomic batch evaluates
 conditions against the pre-batch tree, assigns revisions in submission order,
 and stages the last mutation for each distinct key. Persistent modes retain
 the submission order in one WAL frame, including repeated mutations to the
@@ -30,7 +33,8 @@ are outside the engine budget. Batches have their own per-handle limits.
 Persistent handles reserve workspace for bounded table and catalog
 operations. `FastDBStats.memory_bytes` includes this reservation.
 `FastDBStats.record_count` reports in-memory entries. The LSM count includes
-active tombstones and excludes disk records.
+entries and tombstones in both trees. An overwritten key can appear in both
+counts until publication removes the frozen copy.
 
 The internal merge streams sorted SSTables through one block buffer per
 reader and a min-heap of current records. It retains distinct revisions,
