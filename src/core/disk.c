@@ -1,0 +1,420 @@
+#include "disk.h"
+#include "compaction.h"
+#include "flush.h"
+#include "recovery.h"
+#include "sstable_format.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+struct FDBDisk {
+    FDBDirectory dir;
+    FDBWalSet log;
+    FDBSSTLimits table;
+    FDBManifestLimits manifest;
+    FDBWalLimits wal;
+    FastDBMode mode;
+    FastDBDurability durability;
+    size_t checkpoint_wal_segments;
+    FastDBCompactionOptions compaction;
+    FDBCompactionPolicy policy;
+    size_t reader_bytes;
+    size_t writer_bytes;
+    bool compaction_cleanup_needed;
+};
+
+static const FastDBPersistentOptions defaults = {
+    .durability = FASTDB_DURABILITY_SYNC,
+    .max_wal_segment_bytes = UINT64_C(64) * 1024 * 1024,
+    .max_wal_frame_bytes = 32 * 1024 * 1024,
+    .target_block_bytes = 16 * 1024,
+    .max_index_bytes = 1024 * 1024,
+    .max_filter_bytes = 256 * 1024,
+    .max_catalog_files = 128,
+    .max_catalog_bytes = 512 * 1024,
+    .bloom_bits_per_key = 10,
+};
+
+void fastdb_persistent_options_default(FastDBPersistentOptions *options)
+{
+    if (options != NULL)
+        *options = defaults;
+}
+
+void fastdb_compaction_options_default(FastDBCompactionOptions *options)
+{
+    if (options != NULL) {
+        *options = (FastDBCompactionOptions){
+            .enabled = true,
+            .max_levels = 7,
+            .level0_file_trigger = 4,
+            .level1_bytes = UINT64_C(256) * 1024 * 1024,
+            .level_multiplier = 10,
+            .max_merge_inputs = 8,
+            .target_file_bytes = UINT64_C(64) * 1024 * 1024,
+        };
+    }
+}
+
+/* Catalog edits can retain the current view, the replacement, and a checked disk image. */
+static bool catalog_budget(const FDBManifestLimits *limits, size_t *bytes)
+{
+    size_t one;
+    if (limits->max_files > SIZE_MAX / sizeof(FDBManifestEntry) ||
+        !fdb_add_size(limits->max_bytes, limits->max_files * sizeof(FDBManifestEntry), &one) ||
+        one > SIZE_MAX / 3)
+        return false;
+    *bytes = 3 * one;
+    return true;
+}
+
+static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t *workspace)
+{
+    const FastDBPersistentOptions *storage = &options->storage;
+    const FastDBLimits *limits = &options->limits;
+    size_t record, block;
+    if ((storage->durability != FASTDB_DURABILITY_SYNC && storage->durability != FASTDB_DURABILITY_ASYNC) ||
+        storage->max_catalog_files < 2 ||
+        storage->checkpoint_wal_segments >= storage->max_catalog_files ||
+        (options->mode == FASTDB_MODE_LSM && storage->checkpoint_wal_segments != 0))
+        return FASTDB_INVALID_ARGUMENT;
+    if (!fdb_add_size(FDB_RECORD_HEADER_BYTES, limits->max_key_bytes, &record) ||
+        !fdb_add_size(record, limits->max_value_bytes, &record) ||
+        !fdb_add_size(record, SST_BLOCK_HEADER_BYTES + SST_OFFSET_BYTES, &block) ||
+        storage->max_wal_frame_bytes < FDB_WAL_FRAME_BYTES ||
+        record > storage->max_wal_frame_bytes - FDB_WAL_FRAME_BYTES)
+        return FASTDB_INVALID_ARGUMENT;
+    if (block < storage->target_block_bytes)
+        block = storage->target_block_bytes;
+    disk->wal = (FDBWalLimits){
+        limits->max_key_bytes, limits->max_value_bytes, limits->max_batch_operations,
+        storage->max_wal_frame_bytes, storage->max_wal_segment_bytes,
+    };
+    disk->table = (FDBSSTLimits){
+        limits->max_key_bytes, limits->max_value_bytes, storage->target_block_bytes, block,
+        storage->max_index_bytes, storage->max_filter_bytes, storage->bloom_bits_per_key,
+    };
+    disk->compaction = options->compaction;
+    disk->policy = (FDBCompactionPolicy){
+        disk->compaction.max_levels, disk->compaction.level0_file_trigger,
+        disk->compaction.level1_bytes, disk->compaction.level_multiplier,
+        disk->compaction.max_merge_inputs,
+    };
+    if (options->mode == FASTDB_MODE_LSM &&
+        (!fdb_compaction_policy_valid(&disk->policy) || disk->compaction.target_file_bytes == 0))
+        return FASTDB_INVALID_ARGUMENT;
+    disk->manifest = (FDBManifestLimits){
+        storage->max_catalog_files, storage->max_catalog_bytes, limits->max_key_bytes,
+        options->mode == FASTDB_MODE_LSM ? disk->policy.levels : 7,
+    };
+    disk->mode = options->mode;
+    disk->durability = storage->durability;
+    size_t default_segments = storage->max_catalog_files <= 8 ? storage->max_catalog_files - 1 : 8;
+    disk->checkpoint_wal_segments = storage->checkpoint_wal_segments == 0 ?
+                                    default_segments : storage->checkpoint_wal_segments;
+    size_t bound_keys;
+    if (!fdb_wal_valid_limits(&disk->wal) || !fdb_sst_valid_limits(&disk->table) ||
+        !fdb_manifest_valid_limits(&disk->manifest) ||
+        !fdb_add_size(limits->max_key_bytes, limits->max_key_bytes, &bound_keys) ||
+        !fdb_manifest_can_fit(&disk->manifest, 2, bound_keys) ||
+        !fdb_sst_tree_fits(&disk->table, 1, limits->max_key_bytes))
+        return FASTDB_INVALID_ARGUMENT;
+    size_t writer, reader, catalog;
+    if (!fdb_sst_writer_budget(&disk->table, &writer) ||
+        !fdb_sst_reader_budget(&disk->table, &reader) ||
+        !catalog_budget(&disk->manifest, &catalog) ||
+        !fdb_add_size(sizeof(*disk), catalog, workspace) ||
+        !fdb_add_size(*workspace, writer > reader ? writer : reader, workspace))
+        return FASTDB_INVALID_ARGUMENT;
+    disk->reader_bytes = reader;
+    disk->writer_bytes = writer;
+    size_t smallest_node;
+    size_t available = limits->max_memory_bytes - sizeof(FastDB);
+    if (!fdb_node_size((FastDBSlice){.size = 1}, (FastDBSlice){0}, &smallest_node) ||
+        *workspace > available || smallest_node + FDB_WAL_FRAME_BYTES + FDB_RECORD_HEADER_BYTES + 1 >
+                                  available - *workspace)
+        return FASTDB_INVALID_ARGUMENT;
+    return FASTDB_OK;
+}
+
+FastDBStatus fdb_disk_validate(const FastDBOptions *options)
+{
+    FDBDisk disk;
+    size_t workspace;
+    return settings(options, &disk, &workspace);
+}
+
+typedef struct DirectoryContents {
+    bool manifest;
+    bool native_files;
+    bool other;
+} DirectoryContents;
+
+static FastDBStatus classify_entry(void *context, const char *name)
+{
+    DirectoryContents *contents = context;
+    uint64_t generation;
+    if (strcmp(name, "MANIFEST") == 0)
+        contents->manifest = true;
+    else if (fdb_manifest_temp_generation(name, &generation)) {
+        if (generation != 1)
+            contents->native_files = true;
+    }
+    else if (strncmp(name, "wal-", 4) == 0 || strncmp(name, "sst-", 4) == 0 ||
+             strncmp(name, ".sst-", 5) == 0 || strncmp(name, "chk-", 4) == 0 ||
+             strncmp(name, ".chk-", 5) == 0)
+        contents->native_files = true;
+    else
+        contents->other = true;
+    return FASTDB_OK;
+}
+
+static FastDBStatus check_directory(const FDBDirectory *dir)
+{
+    DirectoryContents contents = {0};
+    FastDBStatus status = fdb_dir_visit(dir, classify_entry, &contents);
+    if (status == FASTDB_OK && !contents.manifest && !contents.native_files && contents.other)
+        return FASTDB_UNSUPPORTED;
+    return status;
+}
+
+static FastDBStatus ensure_manifest(FDBDisk *disk)
+{
+    DirectoryContents contents = {0};
+    FastDBStatus status = fdb_dir_visit(&disk->dir, classify_entry, &contents);
+    if (status != FASTDB_OK || contents.manifest)
+        return status;
+    if (contents.native_files)
+        return FASTDB_CORRUPTION;
+    if (contents.other)
+        return FASTDB_UNSUPPORTED;
+    FDBManifest manifest;
+    status = fdb_manifest_new(disk->mode == FASTDB_MODE_LSM ?
+                              FDB_MODE_LSM : FDB_MODE_MEMORY_PERSISTENT, &manifest);
+    return status == FASTDB_OK ?
+           fdb_manifest_publish(&disk->dir, &disk->manifest, 0, &manifest) : status;
+}
+
+FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs *fs,
+                           const FDBWalReplay *replay, FDBSSTVisit restore)
+{
+    FDBDisk *disk = calloc(1, sizeof(*disk));
+    if (disk == NULL)
+        return FASTDB_OUT_OF_MEMORY;
+    FastDBStatus status = settings(options, disk, &db->disk_budget);
+    if (status == FASTDB_OK)
+        status = fdb_dir_lock_checked(options->path, fs, check_directory, &disk->dir);
+    if (status != FASTDB_OK) {
+        free(disk);
+        return status;
+    }
+    db->disk = disk;
+    status = ensure_manifest(disk);
+    if (status == FASTDB_OK) {
+        status = disk->mode == FASTDB_MODE_LSM ?
+                 fdb_lsm_recover(&disk->dir, &disk->manifest, &disk->wal, &disk->table,
+                                  replay, &disk->log) :
+                 fdb_checkpoint_recover(&disk->dir, &disk->manifest, &disk->wal, &disk->table,
+                                         replay, restore, &disk->log);
+    }
+    if (status != FASTDB_OK) {
+        db->disk = NULL;
+        (void)fdb_dir_close(&disk->dir);
+        free(disk);
+        return status;
+    }
+    db->sequence = disk->log.wal.sequence;
+    return FASTDB_OK;
+}
+
+FastDBStatus fdb_disk_close(FDBDisk *disk)
+{
+    if (disk == NULL)
+        return FASTDB_OK;
+    FastDBStatus status = disk->durability == FASTDB_DURABILITY_ASYNC ?
+                          fdb_wal_set_sync(&disk->log) : FASTDB_OK;
+    FastDBStatus wal_status = fdb_wal_set_close(&disk->log);
+    FastDBStatus dir_status = fdb_dir_close(&disk->dir);
+    free(disk);
+    if (status != FASTDB_OK)
+        return status;
+    return wal_status != FASTDB_OK ? wal_status : dir_status;
+}
+
+bool fdb_disk_poisoned(const FDBDisk *disk)
+{
+    return disk != NULL && disk->log.poisoned;
+}
+
+bool fdb_disk_has_tables(const FDBDisk *disk)
+{
+    return disk != NULL && disk->mode == FASTDB_MODE_LSM;
+}
+
+bool fdb_disk_tree_fits(const FDBDisk *disk, size_t keys, size_t key_bytes)
+{
+    return disk == NULL || fdb_sst_tree_fits(&disk->table, keys, key_bytes);
+}
+
+FastDBStatus fdb_disk_frame_size(const FDBDisk *disk, const FDBRecord *records,
+                                 size_t count, size_t *bytes)
+{
+    return fdb_wal_frame_size(&disk->log.wal, records, count, bytes);
+}
+
+FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count)
+{
+    return fdb_wal_set_append(&disk->log, records, count, disk->durability == FASTDB_DURABILITY_SYNC);
+}
+
+FastDBStatus fdb_lookup_record(const FDBRecord *record, bool copy, FDBLookup *out)
+{
+    free(out->value);
+    *out = (FDBLookup){.revision = record->sequence, .kind = record->kind,
+                       .expires_at_ms = record->expires_at_ms};
+    if (copy && record->kind == FDB_PUT) {
+        size_t size = record->value.size;
+        out->value = malloc(size == 0 ? 1 : size);
+        if (out->value == NULL)
+            return FASTDB_OUT_OF_MEMORY;
+        if (size != 0)
+            memcpy(out->value, record->value.data, size);
+        out->size = size;
+    }
+    return FASTDB_OK;
+}
+
+static FastDBStatus find_in_table(const FDBDisk *disk, const FDBManifestEntry *entry,
+                                  FastDBSlice key, uint64_t sequence, bool copy, FDBLookup *out)
+{
+    FDBSSTReader *reader;
+    FastDBStatus status = fdb_catalog_open_table(&disk->dir, entry, &disk->table, &reader);
+    if (status != FASTDB_OK)
+        return status;
+    FDBSSTIterator *iter;
+    status = fdb_sst_iter_open(reader, &iter);
+    if (status == FASTDB_OK) {
+        fdb_sst_iter_seek_version(iter, key, sequence);
+        status = fdb_sst_iter_status(iter);
+        const FDBRecord *record = fdb_sst_iter_current(iter);
+        if (status == FASTDB_OK && record != NULL && record->sequence > out->revision)
+            status = fdb_lookup_record(record, copy, out);
+        fdb_sst_iter_close(iter);
+    }
+    FastDBStatus close_status = fdb_sst_reader_close(reader);
+    return status == FASTDB_OK ? close_status : status;
+}
+
+FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
+                           bool copy, FDBLookup *out)
+{
+    const FDBManifest *catalog = &disk->log.catalog.view;
+    for (size_t i = catalog->count; i != 0; --i) {
+        const FDBManifestEntry *entry = &catalog->entries[i - 1];
+        if (entry->kind != FDB_FILE_SSTABLE || entry->sequence_end <= out->revision ||
+            entry->sequence_begin > sequence || fdb_compare(entry->min_key, key) > 0 ||
+            fdb_compare(entry->max_key, key) < 0)
+            continue;
+        FastDBStatus status = find_in_table(disk, entry, key, sequence, copy, out);
+        if (status != FASTDB_OK)
+            return status;
+    }
+    return FASTDB_OK;
+}
+
+FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
+{
+    if (!fdb_disk_has_tables(disk))
+        return FASTDB_UNSUPPORTED;
+    FastDBStatus status = fdb_flush_l0(&disk->log, tree, disk->log.wal.sequence, &disk->table);
+    return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
+}
+
+FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *range, size_t headroom)
+{
+    if (!fdb_disk_has_tables(disk) || !disk->compaction.enabled)
+        return manual ? FASTDB_UNSUPPORTED : FASTDB_OK;
+    if (disk->log.poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    if (disk->compaction_cleanup_needed) {
+        FastDBStatus cleanup = fdb_storage_reclaim_orphans(&disk->log);
+        if (cleanup != FASTDB_OK)
+            return cleanup;
+        disk->compaction_cleanup_needed = false;
+    }
+
+    size_t table_workspace = disk->writer_bytes > disk->reader_bytes ?
+                             disk->writer_bytes : disk->reader_bytes;
+    size_t available = table_workspace + headroom;
+    size_t cap = disk->compaction.max_working_bytes;
+    if (cap != 0 && cap < available)
+        available = cap;
+    /* Charge one metadata and cursor bound per input, plus all reader/heap pointers. */
+    size_t input_bytes;
+    if (!fdb_add_size(disk->reader_bytes,
+                     sizeof(FDBSSTReader *) + 2 * sizeof(FDBSSTIterator *) + sizeof(size_t),
+                     &input_bytes))
+        return FASTDB_LIMIT_EXCEEDED;
+    size_t affordable = available > disk->writer_bytes ?
+                        (available - disk->writer_bytes) / input_bytes : 0;
+    FDBCompactionPolicy policy = disk->policy;
+    if (policy.max_inputs > disk->log.catalog.view.count)
+        policy.max_inputs = disk->log.catalog.view.count;
+    if (policy.max_inputs > affordable)
+        policy.max_inputs = affordable;
+    if (policy.max_inputs < 2)
+        policy.max_inputs = 2;
+    size_t inline_inputs[2];
+    size_t input_indexes = policy.max_inputs * sizeof(size_t);
+    size_t *inputs = policy.max_inputs == 2 ? inline_inputs : malloc(input_indexes);
+    if (inputs == NULL)
+        return FASTDB_OUT_OF_MEMORY;
+    const FDBMergeLimits limits = {
+        .output_table = disk->table,
+        .max_inputs = policy.max_inputs,
+        .max_outputs = disk->manifest.max_files,
+        .max_working_bytes = input_indexes <= available ? available - input_indexes : 0,
+        .target_output_bytes = disk->compaction.target_file_bytes,
+    };
+    FastDBStatus status;
+    for (;;) {
+        FDBCompactionPlan plan;
+        status = fdb_compaction_plan(&disk->log.catalog.view, &policy, manual, range, inputs, &plan);
+        if (status != FASTDB_OK || plan.count == 0)
+            break;
+        if (plan.count > affordable) {
+            status = FASTDB_LIMIT_EXCEEDED;
+            break;
+        }
+        status = fdb_compact_once(&disk->log, &policy, &plan, inputs, &limits);
+        if (status != FASTDB_OK) {
+            disk->compaction_cleanup_needed = true;
+            break;
+        }
+    }
+    if (inputs != inline_inputs)
+        free(inputs);
+    return status;
+}
+
+FastDBStatus fdb_disk_checkpoint(FDBDisk *disk, FDBTree *tree)
+{
+    if (disk == NULL || disk->mode != FASTDB_MODE_MEMORY_PERSISTENT)
+        return FASTDB_UNSUPPORTED;
+    FastDBStatus status = fdb_checkpoint_truncate_log(&disk->log, tree, &disk->table);
+    return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
+}
+
+FastDBStatus fdb_disk_maybe_checkpoint(FDBDisk *disk, FDBTree *tree, size_t frame_bytes)
+{
+    if (disk->mode != FASTDB_MODE_MEMORY_PERSISTENT ||
+        frame_bytes <= disk->wal.max_segment_bytes - disk->log.wal.offset)
+        return FASTDB_OK;
+    const FDBManifest *manifest = &disk->log.catalog.view;
+    size_t segments = 0;
+    for (size_t i = 0; i < manifest->count; ++i) {
+        if (manifest->entries[i].kind == FDB_FILE_WAL)
+            ++segments;
+    }
+    return segments < disk->checkpoint_wal_segments ? FASTDB_OK : fdb_disk_checkpoint(disk, tree);
+}

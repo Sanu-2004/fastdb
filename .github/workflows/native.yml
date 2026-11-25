@@ -1,0 +1,37 @@
+name: Native
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        compiler: [gcc-13, clang-18]
+    env:
+      CC: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make test
+      - if: matrix.compiler == 'gcc-13'
+        run: make test-baseline
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        sanitizer: [address, thread]
+    env:
+      CC: clang-18
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTDB_SANITIZER=${{ matrix.sanitizer }}
+      - run: cmake --build build --parallel
+      - if: matrix.sanitizer == 'address'
+        run: ctest --test-dir build --output-on-failure
+      - if: matrix.sanitizer == 'thread'
+        run: ctest --test-dir build -L concurrency --output-on-failure

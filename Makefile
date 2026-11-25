@@ -1,31 +1,38 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -Iinclude -g -O0
-BUILD_DIR = build
-SRC_DIR = src
-OBJ_DIR = $(BUILD_DIR)/obj
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
-OUT = $(BUILD_DIR)/app
+BUILD_DIR ?= build
+BUILD_TYPE ?= Debug
+CMAKE ?= cmake
+CTEST ?= ctest
 
-all:$(OUT)
-	
-$(OUT):$(OBJS) | $(BUILD_DIR)
-	@echo "Linking $(OUT)"
-	@$(CC) $(OBJS) -o $@
+.PHONY: all build test test-integration test-concurrency test-recovery test-sanitizers test-baseline clean
 
-$(OBJ_DIR)/%.o:$(SRC_DIR)/%.c | $(OBJ_DIR)
-	@echo "Compiling $<"
-	@$(CC) $(CFLAGS) -c $< -o $@
+all: build
 
-$(BUILD_DIR):
-	@mkdir -p $(BUILD_DIR)
+build:
+	$(CMAKE) -S . -B "$(BUILD_DIR)" -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+	$(CMAKE) --build "$(BUILD_DIR)" --parallel
 
-$(OBJ_DIR):
-	@mkdir -p $(OBJ_DIR)
+test: build
+	$(CTEST) --test-dir "$(BUILD_DIR)" --output-on-failure
 
-run:$(OUT)
-	@echo "Running $< \n\n"
-	@./$(OUT)
+test-integration: build
+	$(CTEST) --test-dir "$(BUILD_DIR)" -L integration --output-on-failure
+
+test-concurrency: build
+	$(CTEST) --test-dir "$(BUILD_DIR)" -L concurrency --output-on-failure
+
+test-recovery: build
+	$(CTEST) --test-dir "$(BUILD_DIR)" -L recovery --output-on-failure
+
+test-sanitizers:
+	$(CMAKE) -S . -B "$(BUILD_DIR)/asan" -DFASTDB_SANITIZER=address -DCMAKE_BUILD_TYPE=Debug
+	$(CMAKE) --build "$(BUILD_DIR)/asan" --parallel
+	$(CTEST) --test-dir "$(BUILD_DIR)/asan" --output-on-failure
+	$(CMAKE) -S . -B "$(BUILD_DIR)/tsan" -DFASTDB_SANITIZER=thread -DCMAKE_BUILD_TYPE=Debug
+	$(CMAKE) --build "$(BUILD_DIR)/tsan" --parallel
+	$(CTEST) --test-dir "$(BUILD_DIR)/tsan" -L concurrency --output-on-failure
+
+test-baseline:
+	bash scripts/audit-baseline.sh
 
 clean:
-	rm -rf $(BUILD_DIR)
+	$(CMAKE) --build "$(BUILD_DIR)" --target clean

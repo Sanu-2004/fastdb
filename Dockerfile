@@ -1,0 +1,31 @@
+ARG DEBIAN_BASE=debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+FROM ${DEBIAN_BASE} AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake gcc libc6-dev make \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY cmake/ cmake/
+COPY cli/ cli/
+COPY include/ include/
+COPY src/core/ src/core/
+COPY src/storage/ src/storage/
+COPY tests/ tests/
+RUN cmake -S . -B /build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
+    && cmake --build /build --parallel \
+    && ctest --test-dir /build --output-on-failure \
+    && DESTDIR=/stage cmake --install /build
+
+FROM ${DEBIAN_BASE} AS runtime
+RUN groupadd --gid 10001 fastdb \
+    && useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home \
+        --no-log-init --shell /usr/sbin/nologin fastdb \
+    && install -d -m 0700 -o fastdb -g fastdb /data
+COPY --from=build /stage/usr/local/ /usr/local/
+RUN ldconfig
+USER 10001:10001
+WORKDIR /data
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/fastdb-cli"]
+CMD ["--lsm", "/data"]

@@ -1,0 +1,256 @@
+#include "check.h"
+#include "bloom.h"
+#include "crc32c.h"
+#include "sstable_format.h"
+
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+
+static const FDBSSTLimits limits = {16, 64, 82, 128, 512, 0, 0};
+
+static FDBFsFault inject(void *context, FDBFsOp operation, size_t requested)
+{
+    (void)requested;
+    bool *fail_read = context;
+    if (operation == FDB_FS_READ && *fail_read) {
+        *fail_read = false;
+        return (FDBFsFault){.error = EIO};
+    }
+    return (FDBFsFault){0};
+}
+
+static void write_table(const FDBDirectory *dir, const char *name, const FDBSSTLimits *options)
+{
+    const FDBRecord rows[] = {
+        {{"a", 1}, {0}, 7, 0, FDB_PUT},
+        {{"a", 1}, {0}, 5, 0, FDB_DELETE},
+        {{"a", 1}, {0}, 3, 0, FDB_PUT},
+        {{"b", 1}, {"x\0", 2}, 2, 65, FDB_PUT},
+        {{"b", 1}, {0}, 1, 0, FDB_PUT},
+        {{"\xff", 1}, {0}, 4, 0, FDB_DELETE},
+    };
+    FDBSSTWriter *writer;
+    OK(fdb_sst_writer_open(dir, name, 42, options, &writer));
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
+        OK(fdb_sst_writer_add(writer, &rows[i]));
+    FDBSSTProperties properties;
+    OK(fdb_sst_writer_finish(writer, &properties));
+    OK(fdb_sst_writer_destroy(writer));
+}
+
+static void expect(FDBSSTIterator *iter, const char *key, uint64_t sequence, FDBRecordKind kind)
+{
+    OK(fdb_sst_iter_status(iter));
+    const FDBRecord *record = fdb_sst_iter_current(iter);
+    CHECK(record != NULL && record->sequence == sequence && record->kind == kind);
+    CHECK(record->key.size == 1 && memcmp(record->key.data, key, 1) == 0);
+}
+
+static void seek_and_scan(const FDBDirectory *dir, bool *fail_read)
+{
+    write_table(dir, "ordered", &limits);
+    FDBSSTReader *reader;
+    STATUS(fdb_sst_reader_open(dir, "missing", 42, &limits, &reader), FASTDB_CORRUPTION);
+    STATUS(fdb_sst_reader_open(dir, "ordered", 43, &limits, &reader), FASTDB_CORRUPTION);
+    OK(fdb_sst_reader_open(dir, "ordered", 42, &limits, &reader));
+    OK(fdb_sst_reader_verify(reader));
+    const FDBSSTProperties *properties = fdb_sst_reader_properties(reader);
+    CHECK(properties->records == 6 && properties->tombstones == 2);
+    CHECK(properties->min_sequence == 1 && properties->max_sequence == 7);
+
+    FDBSSTIterator *it, *other;
+    OK(fdb_sst_iter_open(reader, &it));
+    OK(fdb_sst_iter_open(reader, &other));
+    fdb_sst_iter_first(it);
+    expect(it, "a", 7, FDB_PUT);
+    fdb_sst_iter_next(it);
+    expect(it, "a", 5, FDB_DELETE);
+    fdb_sst_iter_next(it);
+    expect(it, "a", 3, FDB_PUT);
+    fdb_sst_iter_next(it);
+    expect(it, "b", 2, FDB_PUT);
+    const FDBRecord *b = fdb_sst_iter_current(it);
+    CHECK(b->expires_at_ms == 65 && b->value.size == 2 && memcmp(b->value.data, "x\0", 2) == 0);
+    fdb_sst_iter_seek(other, (FastDBSlice){"c", 1});
+    expect(other, "\xff", 4, FDB_DELETE);
+    CHECK(b->key.size == 1 && *(const char *)b->key.data == 'b');
+    fdb_sst_iter_next(it);
+    expect(it, "b", 1, FDB_PUT);
+    fdb_sst_iter_next(it);
+    expect(it, "\xff", 4, FDB_DELETE);
+    fdb_sst_iter_next(it);
+    CHECK(fdb_sst_iter_current(it) == NULL);
+    OK(fdb_sst_iter_status(it));
+
+    FastDBSlice a = {"a", 1};
+    fdb_sst_iter_seek_version(it, a, 6);
+    expect(it, "a", 5, FDB_DELETE);
+    fdb_sst_iter_seek_version(it, a, 4);
+    expect(it, "a", 3, FDB_PUT);
+    fdb_sst_iter_seek_version(it, a, 2);
+    CHECK(fdb_sst_iter_current(it) == NULL);
+    OK(fdb_sst_iter_status(it));
+    fdb_sst_iter_seek(it, (FastDBSlice){"\xff\xff", 2});
+    CHECK(fdb_sst_iter_current(it) == NULL);
+    OK(fdb_sst_iter_status(it));
+
+    *fail_read = true;
+    fdb_sst_iter_seek(it, a);
+    CHECK(fdb_sst_iter_current(it) == NULL);
+    STATUS(fdb_sst_iter_status(it), FASTDB_IO_ERROR);
+    fdb_sst_iter_close(other);
+    fdb_sst_iter_close(it);
+    OK(fdb_sst_reader_close(reader));
+    OK(fdb_dir_unlink(dir, "ordered"));
+}
+
+static void damage_block(const FDBDirectory *dir, bool valid_checksum)
+{
+    write_table(dir, "damaged", &limits);
+    int fd;
+    OK(fdb_dir_open_file(dir, "damaged", FDB_FILE_READ_WRITE, &fd));
+    unsigned char block[82];
+    size_t done;
+    OK(fdb_fs_read(NULL, fd, SST_HEADER_BYTES, block, sizeof(block), &done));
+    CHECK(done == sizeof(block) && fdb_decode_u32(block + 8) == 2);
+    size_t record_bytes = fdb_decode_u32(block + 4);
+    CHECK(record_bytes == 58);
+    fdb_encode_u32(block + SST_BLOCK_HEADER_BYTES + record_bytes, 1);
+    if (valid_checksum)
+        fdb_encode_u32(block + 12, fdb_crc32c(block + SST_BLOCK_HEADER_BYTES,
+                                             sizeof(block) - SST_BLOCK_HEADER_BYTES));
+    OK(fdb_fs_write(NULL, fd, SST_HEADER_BYTES, block, sizeof(block), &done));
+    CHECK(done == sizeof(block));
+    OK(fdb_fs_close(fd));
+
+    FDBSSTReader *reader;
+    OK(fdb_sst_reader_open(dir, "damaged", 42, &limits, &reader));
+    STATUS(fdb_sst_reader_verify(reader), FASTDB_CORRUPTION);
+    FDBSSTIterator *it;
+    OK(fdb_sst_iter_open(reader, &it));
+    fdb_sst_iter_seek(it, (FastDBSlice){"a", 1});
+    CHECK(fdb_sst_iter_current(it) == NULL);
+    STATUS(fdb_sst_iter_status(it), FASTDB_CORRUPTION);
+    fdb_sst_iter_close(it);
+    OK(fdb_sst_reader_close(reader));
+
+    OK(fdb_dir_open_file(dir, "damaged", FDB_FILE_READ_WRITE, &fd));
+    uint64_t size;
+    OK(fdb_fs_size(fd, &size));
+    OK(fdb_fs_truncate(NULL, fd, size - 1));
+    OK(fdb_fs_close(fd));
+    STATUS(fdb_sst_reader_open(dir, "damaged", 42, &limits, &reader), FASTDB_CORRUPTION);
+    OK(fdb_dir_unlink(dir, "damaged"));
+}
+
+static void bloom_no_false_negatives(void)
+{
+    enum { KEYS = 2048 };
+    size_t length;
+    CHECK(fdb_bloom_size(KEYS, 10, &length));
+    unsigned char *image = malloc(length);
+    CHECK(image != NULL);
+    fdb_bloom_init(image, length, 10);
+    unsigned char key[4];
+    for (uint32_t i = 0; i < KEYS; ++i) {
+        fdb_encode_u32(key, i * UINT32_C(2654435761));
+        fdb_bloom_add(image, (FastDBSlice){key, sizeof(key)});
+    }
+    fdb_bloom_finish(image, length);
+    FDBBloom filter;
+    CHECK(fdb_bloom_decode(image, length, &filter));
+    for (uint32_t i = 0; i < KEYS; ++i) {
+        fdb_encode_u32(key, i * UINT32_C(2654435761));
+        CHECK(fdb_bloom_may_contain(&filter, (FastDBSlice){key, sizeof(key)}));
+    }
+    CHECK(!fdb_bloom_decode(image, length - 1, &filter));
+    free(image);
+}
+
+static void check_bloom_lookup(const FDBDirectory *dir, const FDBSSTLimits *options)
+{
+    FDBSSTReader *reader;
+    OK(fdb_sst_reader_open(dir, "filtered", 42, options, &reader));
+    OK(fdb_sst_reader_verify(reader));
+    FDBSSTIterator *it;
+    OK(fdb_sst_iter_open(reader, &it));
+    fdb_sst_iter_seek_version(it, (FastDBSlice){"a", 1}, 6);
+    expect(it, "a", 5, FDB_DELETE);
+    fdb_sst_iter_seek_version(it, (FastDBSlice){"b", 1}, 2);
+    expect(it, "b", 2, FDB_PUT);
+    fdb_sst_iter_seek_version(it, (FastDBSlice){"\xff", 1}, 4);
+    expect(it, "\xff", 4, FDB_DELETE);
+    for (unsigned char absent = 0; absent < 'a'; ++absent) {
+        fdb_sst_iter_seek_version(it, (FastDBSlice){&absent, 1}, 10);
+        CHECK(fdb_sst_iter_current(it) == NULL);
+        OK(fdb_sst_iter_status(it));
+    }
+    FDBSSTBloomStats stats;
+    fdb_sst_iter_bloom_stats(it, &stats);
+    CHECK(stats.checks == 'a' + 3 && stats.negatives > 0 && stats.corrupt_partitions == 0);
+    CHECK(stats.checks == stats.negatives + stats.positives);
+    CHECK(stats.false_positives + 3 == stats.positives);
+    fdb_sst_iter_close(it);
+    OK(fdb_sst_reader_close(reader));
+}
+
+static void test_bloom(const FDBDirectory *dir)
+{
+    FDBSSTLimits options = limits;
+    options.max_filter_bytes = 128;
+    options.bloom_bits_per_key = 10;
+    write_table(dir, "filtered", &options);
+    options.bloom_bits_per_key = 0;
+    check_bloom_lookup(dir, &options);
+
+    int fd;
+    OK(fdb_dir_open_file(dir, "filtered", FDB_FILE_READ_WRITE, &fd));
+    uint64_t size;
+    size_t done;
+    unsigned char footer[SST_FOOTER_BYTES];
+    OK(fdb_fs_size(fd, &size));
+    OK(fdb_fs_read(NULL, fd, size - sizeof(footer), footer, sizeof(footer), &done));
+    CHECK(done == sizeof(footer) && fdb_decode_u32(footer + 48) == SST_FEATURE_BLOOM);
+    uint64_t first_filter = fdb_decode_u64(footer + 8) - 4 * FDB_BLOOM_MIN_IMAGE_BYTES;
+    unsigned char byte;
+    OK(fdb_fs_read(NULL, fd, first_filter, &byte, 1, &done));
+    CHECK(done == 1);
+    byte ^= 1;
+    OK(fdb_fs_write(NULL, fd, first_filter, &byte, 1, &done));
+    CHECK(done == 1);
+    OK(fdb_fs_close(fd));
+
+    FDBSSTReader *reader;
+    FDBSSTIterator *it;
+    OK(fdb_sst_reader_open(dir, "filtered", 42, &options, &reader));
+    OK(fdb_sst_reader_verify(reader));
+    OK(fdb_sst_iter_open(reader, &it));
+    fdb_sst_iter_seek_version(it, (FastDBSlice){"a", 1}, 6);
+    expect(it, "a", 5, FDB_DELETE);
+    FDBSSTBloomStats stats;
+    fdb_sst_iter_bloom_stats(it, &stats);
+    CHECK(stats.corrupt_partitions == 1 && stats.checks == 0);
+    fdb_sst_iter_close(it);
+    OK(fdb_sst_reader_close(reader));
+    OK(fdb_dir_unlink(dir, "filtered"));
+}
+
+int main(void)
+{
+    char path[] = "/tmp/fastdb-sst-read.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    bool fail_read = false;
+    const FDBFs fs = {inject, &fail_read};
+    FDBDirectory dir;
+    OK(fdb_dir_lock(path, &fs, &dir));
+    seek_and_scan(&dir, &fail_read);
+    damage_block(&dir, false);
+    damage_block(&dir, true);
+    bloom_no_false_negatives();
+    test_bloom(&dir);
+    OK(fdb_dir_close(&dir));
+    char lock_path[sizeof(path) + sizeof("/.fastdb.lock")];
+    CHECK(snprintf(lock_path, sizeof(lock_path), "%s/.fastdb.lock", path) > 0);
+    CHECK(unlink(lock_path) == 0 && rmdir(path) == 0);
+}
