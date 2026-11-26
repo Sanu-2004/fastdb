@@ -735,3 +735,56 @@ setarch x86_64 -R ctest --test-dir /tmp/p37-final-tsan -L concurrency --output-o
 
 `docker build -t fastdb-native:local .` succeeded with GCC Release CTest
 23/23. Docker warned that `git.exe` was unavailable for build metadata.
+
+## Persistent memory descriptor minimum (V065)
+
+The fault fixture samples Linux `/proc/self/fd` from filesystem callbacks,
+subtracting the pre-open baseline and excluding the enumeration descriptor.
+With a 410-byte segment limit, two 181-byte frames fit after the 40-byte
+header. The third write rotates the WAL. The fixture observed five
+descriptors at rotation, then the original validation accepted a
+four-descriptor configuration when the regression expected rejection.
+An earlier fixture with 128-byte values rotated on the second write.
+Changing to 120-byte values aligned the rotation with the probe reset.
+
+The corrected setting rejects 3 and 4 and accepts 5. The probe checks that
+checkpoint, new WAL append and reopen stay within five descriptors, and
+that close returns to the pre-open count. Reopen checks both checkpoint
+values and the latest WAL write. The fixture covers persistent memory on
+Linux and samples the filesystem callback boundaries.
+
+These commands ran in the V064 toolchain container with the source mounted
+read-only:
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-fd-repro -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-fd-repro --target fastdb_lsm_fault --parallel
+ctest --test-dir /tmp/p37-fd-repro -R '^fastdb_lsm_fault$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-fd-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-fd-gcc --parallel
+ctest --test-dir /tmp/p37-fd-gcc -R '^fastdb_lsm_fault$' --output-on-failure
+ctest --test-dir /tmp/p37-fd-gcc --output-on-failure
+
+CC=clang cmake -S /repo -B /tmp/p37-fd-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p37-fd-clang --parallel
+ctest --test-dir /tmp/p37-fd-clang --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-fd-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-fd-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37-fd-asan --output-on-failure
+```
+
+The focused test passed 1/1 with the fix. GCC Debug, Clang Release and
+GCC ASan/UBSan with leak detection passed 23/23 each.
+`docker build -t fastdb-native:local .` succeeded and its Release CTest
+passed 23/23. GCC TSan passed the concurrency label 3/3 with the V062
+container settings:
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-fd-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-fd-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p37-fd-tsan -L concurrency --output-on-failure
+```

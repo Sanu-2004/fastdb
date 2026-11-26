@@ -39,6 +39,9 @@ static void descriptor_budget_validation(void)
     STATUS(fastdb_options_set_storage(options, FASTDB_MODE_MEMORY_PERSISTENT, path, &settings),
            FASTDB_INVALID_ARGUMENT);
     settings.max_open_files = 4;
+    STATUS(fastdb_options_set_storage(options, FASTDB_MODE_MEMORY_PERSISTENT, path, &settings),
+           FASTDB_INVALID_ARGUMENT);
+    settings.max_open_files = 5;
     OK(fastdb_options_set_storage(options, FASTDB_MODE_MEMORY_PERSISTENT, path, &settings));
     fastdb_options_destroy(options);
     CHECK(rmdir(path) == 0);
@@ -48,6 +51,65 @@ static void descriptor_budget_validation(void)
     CHECK(fdb_disk_compaction_fan_in(10, 8) == 2);
     CHECK(fdb_disk_compaction_fan_in(12, 8) == 4);
     CHECK(fdb_disk_compaction_fan_in(10, 3) == 2);
+}
+
+typedef struct DescriptorProbe {
+    size_t baseline;
+    size_t peak;
+} DescriptorProbe;
+
+static FDBFsFault count_descriptors(void *context, FDBFsOp operation, size_t requested)
+{
+    (void)operation;
+    (void)requested;
+    DescriptorProbe *probe = context;
+    size_t current = process_fd_count();
+    CHECK(current >= probe->baseline);
+    size_t owned = current - probe->baseline;
+    if (owned > probe->peak)
+        probe->peak = owned;
+    return (FDBFsFault){0};
+}
+
+static void persistent_descriptor_peak(void)
+{
+    char path[] = "/tmp/fastdb-persistent-fd.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options_with_mode(path, FASTDB_MODE_MEMORY_PERSISTENT,
+                                                      FASTDB_DURABILITY_SYNC);
+    FastDBPersistentOptions settings = options->storage;
+    settings.max_open_files = 5;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_MEMORY_PERSISTENT, path, &settings));
+
+    FastDB *db;
+    DescriptorProbe probe = {.baseline = process_fd_count()};
+    const FDBFs fs = {count_descriptors, &probe};
+    OK(fdb_open_with_fs(options, &fs, &db));
+    unsigned char value[120] = {42};
+    OK(fastdb_put(db, "a", 1, value, sizeof(value)));
+    OK(fastdb_put(db, "b", 1, value, sizeof(value)));
+    probe.peak = 0;
+    /* The third frame rotates the WAL while the first segment is still authoritative. */
+    OK(fastdb_put(db, "c", 1, value, sizeof(value)));
+    CHECK(probe.peak == settings.max_open_files);
+    probe.peak = 0;
+    OK(fastdb_checkpoint(db));
+    OK(fastdb_put(db, "d", 1, value, sizeof(value)));
+    CHECK(probe.peak >= 4 && probe.peak <= settings.max_open_files);
+    OK(fastdb_close(db));
+    CHECK(process_fd_count() == probe.baseline);
+
+    probe.peak = 0;
+    OK(fdb_open_with_fs(options, &fs, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){value, sizeof(value)}, 1);
+    expect_value(db, (FastDBSlice){"c", 1}, (FastDBSlice){value, sizeof(value)}, 3);
+    expect_value(db, (FastDBSlice){"d", 1}, (FastDBSlice){value, sizeof(value)}, 4);
+    CHECK(probe.peak >= 3 && probe.peak <= settings.max_open_files);
+    OK(fastdb_close(db));
+    CHECK(process_fd_count() == probe.baseline);
+
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
 }
 
 typedef struct Injection {
@@ -309,6 +371,7 @@ static void compaction_failure(FDBFsOp op, size_t countdown, FastDBStatus failur
 
 int main(void)
 {
+    persistent_descriptor_peak();
     descriptor_budget_validation();
     low_space_admission();
     sync_failure();

@@ -30,21 +30,6 @@ static const unsigned char new_value[120] = {2};
 static const FastDBSlice old_bytes = {old_value, sizeof(old_value)};
 static const FastDBSlice new_bytes = {new_value, sizeof(new_value)};
 
-static size_t process_fd_count(void)
-{
-    DIR *directory = opendir("/proc/self/fd");
-    CHECK(directory != NULL);
-    size_t count = 0;
-    const struct dirent *entry;
-    while ((entry = readdir(directory)) != NULL) {
-        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
-            ++count;
-    }
-    CHECK(closedir(directory) == 0);
-    CHECK(count != 0);
-    return count - 1; /* Exclude the descriptor used to enumerate /proc/self/fd. */
-}
-
 static FDBFsFault enter_gate(void *context, FDBFsOp operation, size_t size)
 {
     (void)size;

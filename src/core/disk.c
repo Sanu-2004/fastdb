@@ -80,7 +80,8 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     const FastDBPersistentOptions *storage = &options->storage;
     const FastDBLimits *limits = &options->limits;
     size_t record, block;
-    size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 10 : 4;
+    /* WAL rotation can hold the directory, lock, two WALs and temporary manifest. */
+    size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 10 : 5;
     if ((storage->durability != FASTDB_DURABILITY_SYNC && storage->durability != FASTDB_DURABILITY_ASYNC) ||
         storage->max_catalog_files < 2 ||
         storage->max_open_files < minimum_open_files ||

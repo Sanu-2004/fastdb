@@ -45,7 +45,11 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 | `bloom_bits_per_key` | 10 | Bit budget per record, zero disables writing filters |
 | `checkpoint_wal_segments` | 0 | Persistent memory uses up to eight segments, bounded by the catalog limit. A nonzero value configures the threshold. LSM requires zero. |
 | `min_free_bytes` | 0 | Minimum filesystem-available bytes to preserve after a WAL append or estimated flush, checkpoint, or compaction output. Zero disables the check. |
-| `max_open_files` | 256 | Per-database descriptor budget used to cap compaction readers. Persistent memory requires at least 4; LSM requires at least 10. |
+| `max_open_files` | 256 | Per-database descriptor budget used to cap compaction readers. Persistent memory requires at least 5 and LSM at least 10. |
+
+Persistent memory needs five slots during WAL rotation for the directory,
+lock, current WAL, replacement WAL, and temporary manifest. Increase any
+previous persistent-memory setting of 4 to at least 5 before reopening.
 
 For LSM, FastDB reserves eight descriptors in its compaction budget: the
 directory, lock, active WAL, compaction output writer, a concurrent foreground
