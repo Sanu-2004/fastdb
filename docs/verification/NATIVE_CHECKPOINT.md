@@ -659,3 +659,16 @@ Result: build passed; `fastdb_concurrency`, `fastdb_background_flush`, and
 seccomp restriction were also reproduced. This resolves the local runtime
 blocker for this Linux x86-64 Docker setup. It does not constitute a full TSan
 run of every non-concurrency test or coverage on other hosts/platforms.
+
+V063 repeated the same three concurrency-labeled CTests 20 times each under
+the workaround using `/tmp/tsan-repeat`:
+
+```sh
+docker run --rm --network none --security-opt seccomp=unconfined \
+  -v D:/codex/fastdb:/repo:ro --workdir /repo fastdb-local-toolchain:bookworm \
+  sh -lc 'set -e; CC=gcc cmake -S /repo -B /tmp/tsan-repeat -DCMAKE_BUILD_TYPE=Debug -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie >/dev/null; cmake --build /tmp/tsan-repeat --parallel >/dev/null; setarch x86_64 -R ctest --test-dir /tmp/tsan-repeat -L concurrency --repeat until-fail:20 --output-on-failure'
+```
+
+Build passed; all three suites completed 20 repetitions (60/60 suite runs)
+with no TSan diagnostics. This is repeatability evidence for the same host and
+runtime setup, not cross-platform race-safety proof.

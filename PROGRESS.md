@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `7f982df` / `main`. V050–V053 verify P3.6; V054–V062 verify successive P3.7 slices.
+**Last verified base commit / branch:** `1fcf0f4` / `main`. V050–V053 verify P3.6; V054–V063 verify successive P3.7 slices.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -285,6 +285,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V060 | 2026-11-26 / P3.7 atomic batch backpressure retry working tree based on `2f3025d` | Focused GCC Debug `fastdb_background_flush`; full GCC Debug `/tmp/p37b-gcc`, Clang Release `/tmp/p37b-clang`, and GCC ASan/UBSan/LSan `/tmp/p37b-asan` in `fastdb-local-toolchain:bookworm`; Docker GCC 12.2 Release via `docker build -t fastdb-native:local .`. Exact commands in [native verification](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Focused case passed 1/1. Each full profile passed 23/23; Docker GCC 12.2 Release passed 23/23. A two-mutation batch returns BUSY while frozen-slot saturation is gated; neither key is visible. The same batch object commits after `fastdb_flush`, and reopen verifies the delete and retained value. Both normal worker and ENOSPC-retry paths run the assertion. `git diff --check` passed after docs update. |
 | V061 | 2026-11-26 / P3.7 live active+frozen accounting working tree based on `2c68dd8` | GCC Debug CMake/CTest in `fastdb-local-toolchain:bookworm`, source mounted read-only, build `/tmp/p37mem-gcc`; focused `fastdb_background_flush` and full CTest. | PASS | Focused case passed 1/1; full suite passed 23/23. During gated flush with active and frozen data, `FastDBStats.memory_bytes` equals the visible active/frozen tree bytes, handle, iterator bytes, and reserved disk workspace, and remains within 128 KiB. This verifies accounting consistency, not RSS or an actual configured-budget saturation boundary. Clang, sanitizers, Docker, TSan NOT RUN on this source change; details in [native verification](docs/verification/NATIVE_CHECKPOINT.md). |
 | V062 | 2026-11-26 / P3.7 TSan runtime workaround, source at `9402e0a` | GCC 12.2 Debug `FASTDB_SANITIZER=thread` full build in Docker with `--security-opt seccomp=unconfined`; `setarch x86_64 -R ctest --test-dir /tmp/tsan-p37 -L concurrency --output-on-failure`. Exact invocation in [native verification](docs/verification/NATIVE_CHECKPOINT.md). | PASS | TSan concurrency suite passed 3/3 (`fastdb_concurrency`, `fastdb_background_flush`, `fastdb_read_view`). Default profile reproduced unexpected mapping; default seccomp denied `setarch`; disabling seccomp for disposable container allowed per-process ASLR disable. No race reports. This resolves B004 for this environment, not all-host/platform TSan coverage. |
+| V063 | 2026-11-26 / P3.7 TSan concurrency repeat, source at `1fcf0f4` | GCC 12.2 Debug TSan build in Docker with `--security-opt seccomp=unconfined`; `setarch x86_64 -R ctest --test-dir /tmp/tsan-repeat -L concurrency --repeat until-fail:20 --output-on-failure`. Exact command in [native verification](docs/verification/NATIVE_CHECKPOINT.md). | PASS | All three concurrency suites passed 20 repetitions each (60 suite runs total) without TSan diagnostics. Same Linux x86-64 host/runtime; this does not establish cross-platform behavior. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -501,14 +502,22 @@ These are deliberate boundaries, not completed features:
 - Next task remains P3.7 actual active+frozen memory saturation. Exact command and scope in [native verification](docs/verification/NATIVE_CHECKPOINT.md). `git diff --check` to be run before commit.
 - Committed and pushed as `7f982df` (`Resolve Docker TSan runtime mapping issue`) to `origin/main`; post-push status was clean `main...origin/main`.
 
+### Session 017 — 2026-11-26 — Repeat TSan concurrency verification
+
+- Started at pushed `1fcf0f4` on clean `main`; verified B004's workaround and P3.7 memory-saturation handoff. No project source changes.
+- Rebuilt GCC TSan binaries in Docker with seccomp unconfined and ran all three concurrency-labeled suites under `setarch x86_64 -R` with `--repeat until-fail:20`.
+- V063 passed 3 suites × 20 repetitions = 60 suite runs with no TSan diagnostics. Build succeeded. Exact command and scope are in [native verification](docs/verification/NATIVE_CHECKPOINT.md).
+- B004 remains resolved for this local setup. P3.7 memory saturation is still the next implementation task; no task status was advanced. `git diff --check` passed before publication.
+- Committed and pushed as `PENDING` (fill with actual commit after push); no code changed. Tests used disposable directories.
+
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by testing actual aggregate active+frozen memory saturation, using V061 only as accounting evidence, not proof of saturation. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Derive minimal valid LSM limits and threshold from `fdb_disk_validate` in `src/core/disk.c`; gate worker I/O in `tests/native/background_flush.c`, fill active memory to rejection, assert exact budget and no partial commit, release/publish frozen tree, and retry. Then run all applicable compiler/sanitizer/Docker checks for the final code.
-- **Last verified good checkpoint:** P3.7 commit `7f982df` on `origin/main`; V060 passed focused backpressure (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker GCC Release (23/23 each). V061 GCC Debug focused/full passed 1/1 and 23/23. V062 TSan concurrency passed 3/3 using the documented workaround. Post-push working tree was clean.
-- **Working-tree state:** Clean at pushed commit `7f982df` on `origin/main`. No code changed during the TSan workaround session. Tests used disposable data directories; no owner data was opened.
+- **Last verified good checkpoint:** P3.7 commit `1fcf0f4` on `origin/main`; V060 passed focused backpressure (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker GCC Release (23/23 each). V061 GCC Debug focused/full passed 1/1 and 23/23. V062 TSan concurrency passed 3/3; V063 repeated those suites 20 times each (60/60) using the documented workaround.
+- **Working-tree state:** V063 documentation is uncommitted; no code changed this session. Tests used disposable data directories; no owner data was opened.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Close now has a regression proving it reports an unretried background compaction error. `max_open_files` reserves eight slots for compaction fan-in but is not a strict cap during every open/recovery path or process-wide across database instances. Disk headroom is advisory and checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Queue/memory/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
