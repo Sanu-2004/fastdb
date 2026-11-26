@@ -45,17 +45,17 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 | `bloom_bits_per_key` | 10 | Bit budget per record, zero disables writing filters |
 | `checkpoint_wal_segments` | 0 | Persistent memory uses up to eight segments, bounded by the catalog limit. A nonzero value configures the threshold. LSM requires zero. |
 | `min_free_bytes` | 0 | Minimum filesystem-available bytes to preserve after a WAL append or estimated flush, checkpoint, or compaction output. Zero disables the check. |
-| `max_open_files` | 256 | Per-database descriptor budget used to cap compaction readers. Persistent memory requires at least 4; LSM requires at least 8. |
+| `max_open_files` | 256 | Per-database descriptor budget used to cap compaction readers. Persistent memory requires at least 4; LSM requires at least 10. |
 
-For LSM, FastDB reserves six descriptors in its compaction budget for the
-directory, lock, WAL, compaction output writer, a concurrent foreground flush
-writer, and one pinned point read. The effective compaction reader fan-in is
-`min(max_merge_inputs, max_open_files - 6)`. Thus the minimum LSM budget of 8
-permits a two-reader merge. Insufficient settings are rejected at option
-validation. This budgets compaction reader fan-in; it is not a hard cap on all
-FastDB descriptors during open/recovery or across multiple database instances,
-and it does not constrain unrelated process files. Accounting for all
-non-compaction descriptor use remains incomplete.
+For LSM, FastDB reserves eight descriptors in its compaction budget: the
+directory, lock, active WAL, compaction output writer, a concurrent foreground
+flush writer, one pinned point read, a replacement WAL during rotation, and a
+manifest file during catalog publication. The effective compaction reader
+fan-in is `min(max_merge_inputs, max_open_files - 8)`. Thus the minimum LSM
+budget of 10 permits a two-reader merge. Insufficient settings are rejected
+at option validation. This budgets compaction reader fan-in; it is not a hard
+cap on all FastDB descriptors during open/recovery or across multiple database
+instances, and it does not constrain unrelated process files.
 
 When `min_free_bytes` is nonzero, persistent writes query available filesystem
 space before appending the WAL frame; if the append requires WAL rotation, the

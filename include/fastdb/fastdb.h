@@ -73,7 +73,7 @@ typedef struct FastDBPersistentOptions {
     size_t checkpoint_wal_segments;
     /* Keep at least this many bytes free after each persistent write. Zero disables checks. */
     uint64_t min_free_bytes;
-    /* Compaction descriptor budget; LSM requires 8, persistent memory requires 4. */
+    /* Compaction descriptor budget; LSM requires 10, persistent memory requires 4. */
     size_t max_open_files;
 } FastDBPersistentOptions;
 

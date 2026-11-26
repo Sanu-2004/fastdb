@@ -80,7 +80,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     const FastDBPersistentOptions *storage = &options->storage;
     const FastDBLimits *limits = &options->limits;
     size_t record, block;
-    size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 8 : 4;
+    size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 10 : 4;
     if ((storage->durability != FASTDB_DURABILITY_SYNC && storage->durability != FASTDB_DURABILITY_ASYNC) ||
         storage->max_catalog_files < 2 ||
         storage->max_open_files < minimum_open_files ||
@@ -163,7 +163,8 @@ FastDBStatus fdb_disk_validate(const FastDBOptions *options)
 
 size_t fdb_disk_compaction_fan_in(size_t max_open_files, size_t configured_max)
 {
-    const size_t reserved = 6;
+    /* Include overlapping WAL rotation and manifest publication during a flush. */
+    const size_t reserved = 8;
     if (max_open_files <= reserved)
         return 0;
     size_t available = max_open_files - reserved;

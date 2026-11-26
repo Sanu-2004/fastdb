@@ -514,3 +514,28 @@ Linux container were `/tmp/p37-close-error`, `/tmp/p37c-gcc`,
 `/tmp/p37c-clang`, and `/tmp/p37c-asan`. No engine code change was needed;
 this adds evidence for the existing error and recovery contract. TSan was
 not rerun because B004 remains open.
+
+## Concurrent compaction and foreground-flush descriptor budget
+
+V058 added descriptor counting to the gated overlap in
+`tests/native/background_flush.c`. The test counts `/proc/self/fd` entries,
+excludes the enumeration handle, subtracts the post-open baseline, and adds
+the three base descriptors owned by the database (directory, lock and active
+WAL). It runs background compaction while publishing a foreground L0 flush
+with `max_open_files=10` and asserts the observed per-database high-water
+stays within that budget.
+
+The first run used a budget of 8 and measured 10 descriptors. The missing
+slots were a replacement WAL during rotation and a temporary manifest during
+catalog publication, which can overlap compaction readers/output and the
+foreground flush writer. The reservation is now eight descriptors, and LSM
+rejects budgets below 10 so a two-reader merge remains possible. The setting
+is still a compaction fan-in budget, not a hard cap across every recovery or
+open path and not a process-wide cap.
+
+Focused GCC Debug runs of `fastdb_background_flush` and `fastdb_lsm_fault`
+passed 1/1 each. GCC 12.2 Debug, Clang 14 Release and GCC ASan/UBSan/LSan
+full CTest passed 23/23 each using `/tmp/p37fd2-gcc`, `/tmp/p37fd2-clang`,
+and `/tmp/p37fd2-asan` in the read-only toolchain container. The Docker
+Release build also passed 23/23. The failed 8-FD assertion was reproduced
+before the correction; all post-correction checks passed.

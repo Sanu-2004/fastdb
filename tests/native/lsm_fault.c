@@ -43,11 +43,11 @@ static void descriptor_budget_validation(void)
     fastdb_options_destroy(options);
     CHECK(rmdir(path) == 0);
 
-    CHECK(fdb_disk_compaction_fan_in(6, 8) == 0);
-    CHECK(fdb_disk_compaction_fan_in(7, 8) == 1);
-    CHECK(fdb_disk_compaction_fan_in(8, 8) == 2);
-    CHECK(fdb_disk_compaction_fan_in(10, 8) == 4);
-    CHECK(fdb_disk_compaction_fan_in(10, 3) == 3);
+    CHECK(fdb_disk_compaction_fan_in(8, 8) == 0);
+    CHECK(fdb_disk_compaction_fan_in(9, 8) == 1);
+    CHECK(fdb_disk_compaction_fan_in(10, 8) == 2);
+    CHECK(fdb_disk_compaction_fan_in(12, 8) == 4);
+    CHECK(fdb_disk_compaction_fan_in(10, 3) == 2);
 }
 
 typedef struct Injection {
@@ -83,10 +83,10 @@ static void low_space_admission(void)
     settings.max_catalog_files = 16;
     settings.max_catalog_bytes = 2048;
     settings.min_free_bytes = 1024;
-    settings.max_open_files = 7;
+    settings.max_open_files = 9;
     STATUS(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings),
            FASTDB_INVALID_ARGUMENT);
-    settings.max_open_files = 8;
+    settings.max_open_files = 10;
     OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings));
 
     Injection injection = {.op = FDB_FS_SPACE, .available_bytes = 1024,
