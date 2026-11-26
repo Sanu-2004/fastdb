@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `a1a7b53` / `main`. V050–V053 verify P3.6; V054 verifies the initial P3.7 headroom slice.
+**Last verified base commit / branch:** `e812fc5` / `main`. V050–V053 verify P3.6; V054–V055 verify the current P3.7 headroom implementation and tests.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -428,7 +428,7 @@ These are deliberate boundaries, not completed features:
 - Started from pushed `9365535` (clean `main`). Continued P3.7 in dependency order; did not work ahead to later Docker/Compose, server, or Studio tasks.
 - Added tests for compaction refusal before any output/catalog change when headroom is insufficient, successful retry after restoring headroom, and the `UINT64_MAX` configured boundary without revision change. Code review caught and fixed use of `frame_bytes` when frame-size calculation returned an error.
 - The first compaction assertion ran before a table existed and the engine correctly had nothing to compact; moved it after a verified flush. V055 passed GCC Debug, Clang Release, GCC ASan/UBSan/LSan (23/23 each), and Docker GCC Release (23/23).
-- V055 commands/results are recorded in [native verification](docs/verification/NATIVE_CHECKPOINT.md). Changes remain in the working tree until the final commit/push for this session.
+- V055 commands/results are recorded in [native verification](docs/verification/NATIVE_CHECKPOINT.md). Committed and pushed as `e812fc5` (`Verify disk headroom compaction admission`).
 - Next within P3.7: define and enforce a per-database open-file cap against compaction reader fan-in and fixed directory/lock/WAL/output descriptors; add deterministic admission coverage; continue bounded worker/memory checks. Keep P3.7 IN_PROGRESS until queue, memory, FD, disk headroom and safe error states are all verified.
 
 ## 9. Current handoff
@@ -437,8 +437,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by adding a configurable per-database open-file cap and enforcing a safe compaction fan-in after accounting for directory, lock, WAL and output descriptors. Then review queue/memory/background limits and error paths. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Start from the pushed checkpoint after this session. Add deterministic native tests for descriptor-budget validation and compaction admission. Run GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker Release CTest using [native verification](docs/verification/NATIVE_CHECKPOINT.md).
-- **Last verified good checkpoint:** P3.6 commits `a2b870c`; initial P3.7 headroom commit `a1a7b53`; V055 on the current working tree passed GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
-- **Working-tree state:** P3.7 code/tests/docs/ledger changes are uncommitted, based on `9365535`. No owner data was opened in tests.
+- **Last verified good checkpoint:** P3.6 commit `a2b870c`; P3.7 commits `a1a7b53` and `e812fc5`. V055 on `e812fc5` passed GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
+- **Working-tree state:** Clean at pushed commit `e812fc5` on `origin/main`. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.7 can proceed locally with normal builds and other sanitizers.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Disk headroom is advisory and currently checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Full P3.7 queue/FD/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
