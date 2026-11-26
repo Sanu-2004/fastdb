@@ -7,6 +7,14 @@ existing dedicated directory. New databases initialize an empty directory.
 An unrecognized directory is refused before new metadata is published.
 See [migration](MIGRATION.md) for the supported legacy export path.
 
+TTL writes convert the duration to an absolute UTC deadline during commit
+staging and encode it in the same atomic WAL frame as the mutation.
+Recovery, checkpoint, flush and compaction preserve that deadline. Logical
+expiration masks earlier revisions. Explicit purge in persistent memory
+appends a DELETE for each expired key it removes. A purge that reports
+`FASTDB_COMMIT_UNCERTAIN` may have an additional deletion beyond its
+confirmed count. Reopen to resolve the WAL state.
+
 ## Verified internal persistence primitives
 
 The storage layer opens an existing directory, then takes a nonblocking

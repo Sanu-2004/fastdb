@@ -37,6 +37,33 @@ retirement. Release makes those files eligible for cleanup on the next
 maintenance operation or close. An LSM page also budgets two key buffers
 of at most `max_key_bytes` each and uses the reserved table reader workspace.
 
+### Record expiration
+
+`fastdb_put_with_ttl` and `fastdb_batch_put_with_ttl` accept a duration in
+milliseconds. Zero means no expiration. The engine samples UTC wall time
+while staging the commit and adds the duration to produce an absolute
+deadline. Timed writes in the same batch use one sample. If the sum
+exceeds `UINT64_MAX`, the write or batch returns `FASTDB_LIMIT_EXCEEDED`
+before publishing any mutation. The timestamp is stored in the existing
+WAL and table record format.
+
+A value expires at its deadline, including when the read time exactly
+equals it. The latest expired value masks every older revision of its
+key. Live reads evaluate the current UTC clock and snapshots use their
+captured read time. A wall-clock correction can move a live read to the
+other side of a deadline. An explicit deletion remains effective across
+clock changes. Clock read failures are reported as `FASTDB_IO_ERROR`.
+
+`fastdb_purge_expired` samples the clock once and removes up to the requested
+number of expired keys from either memory mode. The positive limit may
+not exceed `max_batch_operations`. It walks the current tree under the
+database mutex and commits each deletion separately, reporting the number
+confirmed even if a later deletion fails. Persistent memory uses the WAL
+and configured durability for these deletes. A snapshot retains its
+independent copy. LSM retains expired records as masks until safe history
+collection and returns `FASTDB_UNSUPPORTED` for explicit purge. Live
+entries are not evicted under memory pressure.
+
 To configure persistence, initialize `FastDBPersistentOptions` with
 `fastdb_persistent_options_default`, then pass it to `fastdb_options_set_storage`
 with an existing directory and mode. A null settings pointer selects the

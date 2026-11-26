@@ -877,6 +877,52 @@ cmake --build /tmp/p38-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p38-tsan -L concurrency --repeat until-fail:5 --output-on-failure
 ```
 
+## P3.9 TTL and purge checkpoint (V069)
+
+`fastdb_ttl` failed to link against the pre-TTL engine in `/tmp/p39-red`.
+The new case passed in `/tmp/p39-green`, but the initial full run failed
+`fastdb_memory` because test clock fields increased every handle's size.
+Moved the controlled clock to the test binary via linker wrapping and
+preserved the existing 512-byte fixture. Also corrected a test symbol
+collision with the C library's `clock` and updated the fault fixture to check
+the WAL's conservative uncertain result after an append error.
+
+The final suite verifies the exact expiration boundary, no resurrection of
+older LSM values, retained snapshot time, batch deadline calculation and
+overflow rollback, clock errors, WAL replay and checkpoint preservation.
+An injected failure on the second purge append reports one confirmed
+deletion. Reopen checks the first deletion and the retained second record
+before retrying. The test uses disposable data directories.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p39-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p39-red --target fastdb_ttl --parallel
+
+CC=gcc cmake -S /repo -B /tmp/p39-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p39-gcc --parallel
+ctest --test-dir /tmp/p39-gcc -R '^fastdb_ttl$' --output-on-failure
+ctest --test-dir /tmp/p39-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p39-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p39-clang --parallel
+ctest --test-dir /tmp/p39-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p39-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p39-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p39-asan --output-on-failure
+```
+
+The commands ran inside the V064 toolchain container. The focused TTL
+test passed 1/1 and the final full profiles passed 25/25 each. `docker build
+-t fastdb-native:local .` succeeded with Release CTest 25/25. The V062
+TSan setup ran all four concurrency tests five times each (20 executions).
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p39-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p39-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p39-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

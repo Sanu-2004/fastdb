@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `8e49bbd` / `main`. V068 verifies the P3.8 completion checkpoint.
+**Last verified base commit / branch:** `f9fbd3e` / `main`. V068 closed P3.8. V069 verifies TTL and explicit expiration reclamation.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.9 — TTL, bounded expiration reclamation and opt-in memory eviction.
 
@@ -102,7 +102,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P3.6 | Compaction worker(s), conflict reservations, commit revalidation, scheduling, safe failure/cancel/shutdown. | DONE | V050–V053: compiler/sanitizer matrix, 20x concurrency repeats, analyzer, Docker build/restart. Stable IDs and destination overlap closure are revalidated after detached merge; concurrent L0 flush is retained, temporary output IDs are protected, worker failure preserves inputs and retry/reopen succeeds; close drains active worker merge. Queued-before-start cancellation has code coverage by inspection but no separately gated regression. |
 | P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | DONE | V054–V060 cover low-space preflight, bounded worker queues, safe shutdown errors and atomic backpressure. V064 verifies active plus frozen memory saturation and compaction workspace admission. V065 measures the persistent memory rotation peak of five FDs. V066 verifies the LSM floor of ten across recovery and a pinned read, two-reader compaction, WAL rotation and foreground flush. GCC Debug, Clang Release, ASan/UBSan with leak detection and Docker Release each passed 23/23. TSan passed 15 executions across three concurrency tests. Bounds are engine-accounted and disk preflight is advisory. Release-scale RSS measurement is tracked in P3.11 and P8.3. |
 | P3.8 | Native snapshots and history retention across memtable and disk; atomic batch visibility; coherent merged scans. | DONE | V067 verifies memory capture and allocation rollback. V068 verifies active/frozen and SSTable snapshot capture, file retention through compaction, coherent live and snapshot range/prefix pages, binary ordering, tombstone masking, and scan error propagation. All full configurations passed 24/24 and TSan passed 20 executions. See [ADR 0008](docs/adr/0008-lsm-snapshots-and-bounded-pages.md). |
-| P3.9 | TTL with controlled clock, expiration masking, physical reclamation and explicitly enabled memory eviction policies. | TODO | — |
+| P3.9 | TTL with controlled clock, expiration masking, physical reclamation and explicitly enabled memory eviction policies. | IN_PROGRESS | V069 adds commit-time TTL to single writes and batches in all modes, snapshot-time visibility, exact-boundary masking across WAL/recovery/compaction, and explicit bounded purge in both memory modes. All full profiles passed 25/25; TSan passed 20 executions. Opt-in memory-only FIFO/LRU/LFU remains. Safe LSM history collection is P3.10. |
 | P3.10 | Safe obsolete-version/tombstone collection with proof, active snapshot checks and no data resurrection. Depends P3.8/P3.9. | TODO | — |
 | P3.11 | Multilevel integration, crash during compaction, concurrent GET/PUT/DELETE, history checks, TSan and bounded-memory merge verification. | TODO | — |
 
@@ -205,7 +205,7 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | — |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V068 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V069 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -291,6 +291,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V066 | 2026-11-26 / P3.7 completion based on `4d3f6e8` | GCC Debug, Clang Release, ASan/UBSan/LSan and TSan Docker container builds plus Docker Release image build. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | LSM recovery samples four descriptors with table validation, two WALs and orphan cleanup. Gated read, two-reader compaction, WAL rotation and foreground flush sample 9–10 under budget 10, preserve revisions across close and reopen, and test BUSY while reclamation waits on the pinned read. Full GCC, Clang, ASan/UBSan/LSan and Docker passed 23/23 each. TSan concurrency 3 suites × 5 repeats. |
 | V067 | 2026-11-26 / first P3.8 checkpoint based on `2829264` | GCC Debug, Clang Release, ASan/UBSan/LSan and TSan Docker container builds, focused snapshot and allocation tests, and Docker Release. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Point-read snapshots preserve the pre-batch view across overwrite, deletion and checkpoint. Tests cover 512 snapshot captures alongside a batch writer, one-slot and exact byte admission, release, close BUSY, and allocation rollback. Both focused tests passed 1/1. GCC, Clang, ASan/UBSan/LSan and Docker passed 24/24 each. TSan passed 20 executions across four tests. |
 | V068 | 2026-11-26 / P3.8 completion based on `8e49bbd` | Test-first build, GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | New scan tests initially failed to link. Final tests cover range/prefix pagination, snapshot/page charging and ownership, frozen tree capture, pinned table cleanup, masked keys, and scan I/O error. All full profiles 24/24; TSan four suites × five repeats. |
+| V069 | 2026-11-26 / P3.9 TTL checkpoint based on `f9fbd3e` | Test-first build, focused controlled-clock TTL test, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Exact deadline, commit-time batch TTL, overflow rollback, clock error, snapshots, WAL replay/checkpoint/compaction and partial purge uncertainty tested. First full GCC run had one tight-memory regression. Test-only clock wrapping restored the existing budget. Final focused TTL 1/1, full profiles 25/25 and TSan 20 executions. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -550,15 +551,22 @@ These are deliberate boundaries, not completed features:
 - LSM snapshots copy active/frozen trees and SSTable bounds under the commit mutex. The copied catalog pins original tables through compaction. Range and prefix pages merge candidates by key and revision and own independent allocations. Out-of-range tables are skipped and relevant I/O errors abort a scan.
 - V068 passed GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release 24/24 each. TSan passed 20 executions. P3.8 DONE. Added ADR 0008 and updated configuration and concurrency information.
 
+### Session 023 — 2026-11-26 — TTL and explicit expiry purge
+
+- Started at pushed `f9fbd3e` with P3.8 complete. Added controlled-clock cases before TTL implementation and reproduced the missing public API at link time.
+- Timed single writes and atomic batches store absolute UTC deadlines in the existing record format. Reads and scans mask older versions using the latest revision before applying expiration. Both memory modes can explicitly purge expired keys, with persistent purge using separate WAL deletes and reporting confirmed progress.
+- The first full run found that embedding the test clock in every handle broke the existing 512-byte memory fixture. Link wrapping confines the controlled clock to the test binary. Also corrected a clock symbol name collision and aligned the injected WAL write failure test with the existing uncertain outcome contract. Final V069 passed full GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release 25/25 each, and TSan concurrency 20 executions.
+- P3.9 remains IN_PROGRESS for opt-in memory eviction. Default memory pressure still refuses writes when they exceed admission. No TTL compaction garbage collection was enabled.
+
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
 - **Next task ID:** P3.9.
-- **Next action:** Add controlled-clock TTL tests, then implement commit-time TTL writes and bounded expiration reclamation in the memory modes.
-- **Next commands:** Trace the operation-to-WAL path in `src/core/engine.c` and the shared visibility predicate in `src/core/record.c`. Test the exact expiration boundary, retained snapshots, CAS absence, compaction/reopen masking and purge durability. Continue with opt-in memory eviction once TTL is verified.
-- **Last verified good checkpoint:** V068 P3.8 completion based on `8e49bbd`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the matrix.
-- **Working-tree state:** P3.8 completion contains the snapshot/scan implementation, acceptance tests and documentation. Confirm with `git status --short --branch`.
+- **Next action:** Finish P3.9 by implementing explicit opt-in FIFO/LRU/LFU for memory-only mode without changing the default memory admission or allowing persistent eviction.
+- **Next commands:** Add deterministic policy ordering and rejected batch tests before changes to `src/core/engine.c` and `src/core/memtable.c`. Exercise exact live capacity vs transient writer headroom, snapshot retention, allocation rollback and persistent-mode configuration rejection. Use optional metadata charged only for enabled caches so the existing 512-byte fixture remains valid. Keep eviction selection atomic with successful write publication and test that failed commits leave the selected victims visible. Then verify the full Docker matrix before P3.10.
+- **Last verified good checkpoint:** V069 TTL source changes based on `f9fbd3e`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records V068 and V069.
+- **Working-tree state:** V069 includes native TTL APIs, the controlled-clock and purge test suite, and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
-- **Critical limits:** One snapshot may be open per database. Capture and page allocation are charged to its memory budget. LSM scans make repeated seeks while holding the mutex. TTL writes, eviction, size-tiered compaction, history reclamation, power-loss tests and release-scale verification remain open.
+- **Critical limits:** One snapshot may be open per database. Capture and page allocation are charged to its memory budget. LSM scans make repeated seeks while holding the mutex. TTL uses UTC deadlines and LSM keeps expired records until safe history collection. Opt-in eviction, size-tiered compaction, history reclamation, power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

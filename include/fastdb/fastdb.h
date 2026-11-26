@@ -144,6 +144,11 @@ FASTDB_API FastDBStatus fastdb_compact_range(FastDB *db, const FastDBRange *rang
 
 FASTDB_API FastDBStatus fastdb_put(FastDB *db, const void *key, size_t key_size,
                                   const void *value, size_t value_size);
+/* Zero TTL is permanent. Positive TTL is measured in milliseconds from commit staging. */
+FASTDB_API FastDBStatus fastdb_put_with_ttl(FastDB *db, const void *key, size_t key_size,
+                                           const void *value, size_t value_size, uint64_t ttl_ms);
+/* Remove up to limit expired keys in the memory modes. Reports completed deletions on error. */
+FASTDB_API FastDBStatus fastdb_purge_expired(FastDB *db, size_t limit, size_t *removed);
 FASTDB_API FastDBStatus fastdb_delete(FastDB *db, const void *key, size_t key_size);
 /* A successful GET returns a caller-owned allocation, even for an empty value. */
 FASTDB_API FastDBStatus fastdb_get(FastDB *db, const void *key, size_t key_size,
@@ -162,6 +167,8 @@ FASTDB_API FastDBStatus fastdb_batch_create(const FastDBOptions *options, FastDB
 FASTDB_API void fastdb_batch_destroy(FastDBBatch *batch);
 FASTDB_API FastDBStatus fastdb_batch_put(FastDBBatch *batch, const void *key, size_t key_size,
                                         const void *value, size_t value_size);
+FASTDB_API FastDBStatus fastdb_batch_put_with_ttl(FastDBBatch *batch, const void *key, size_t key_size,
+                                                 const void *value, size_t value_size, uint64_t ttl_ms);
 FASTDB_API FastDBStatus fastdb_batch_delete(FastDBBatch *batch, const void *key,
                                            size_t key_size);
 FASTDB_API FastDBStatus fastdb_batch_expect(FastDBBatch *batch, const void *key,

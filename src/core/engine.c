@@ -3,7 +3,6 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 typedef enum OperationKind { PUT, DELETE, EXPECT } OperationKind;
 
@@ -12,7 +11,10 @@ typedef struct Operation {
     OperationKind kind;
     FastDBSlice key;
     FastDBSlice value;
-    uint64_t expected;
+    union {
+        uint64_t expected;
+        uint64_t ttl_ms;
+    };
 } Operation;
 
 typedef struct BatchEntry {
@@ -528,18 +530,13 @@ static FastDBStatus lookup(FastDB *db, FastDBSlice key, bool copy, bool allow_pi
     if (status != FASTDB_OK)
         return status;
 
-    bool visible = out->revision != 0 && out->kind != FDB_DELETE;
-    if (visible && out->expires_at_ms != 0) {
-        struct timespec now;
-        if (timespec_get(&now, TIME_UTC) != TIME_UTC)
-            return FASTDB_IO_ERROR;
-        if (now.tv_sec >= 0) {
-            uint64_t seconds = (uint64_t)now.tv_sec;
-            visible = seconds <= (UINT64_MAX - 999) / 1000 &&
-                      out->expires_at_ms > seconds * 1000 + (uint64_t)(now.tv_nsec / 1000000);
-        }
+    uint64_t read_time = 0;
+    if (out->revision != 0 && out->kind == FDB_PUT && out->expires_at_ms != 0) {
+        status = fdb_read_time(&read_time);
+        if (status != FASTDB_OK)
+            return status;
     }
-    if (!visible) {
+    if (out->revision == 0 || !fdb_record_visible(out->kind, out->expires_at_ms, read_time)) {
         free(out->value);
         *out = (FDBLookup){0};
     }
@@ -694,18 +691,35 @@ static FastDBStatus commit_writes(FastDB *db, const Operation *op, size_t count)
         }
     }
     uint64_t sequence = db->sequence;
+    uint64_t write_time = 0;
+    bool sampled_time = false;
     size_t i = 0;
     for (; op != NULL; op = op->next) {
         if (op->kind == EXPECT)
             continue;
-        FDBRecord record = {op->key, op->value, ++sequence, 0, op->kind == PUT ? FDB_PUT : FDB_DELETE};
+        uint64_t expiration = 0;
+        if (op->kind == PUT && op->ttl_ms != 0) {
+            if (!sampled_time) {
+                status = fdb_read_time(&write_time);
+                if (status != FASTDB_OK)
+                    break;
+                sampled_time = true;
+            }
+            if (op->ttl_ms > UINT64_MAX - write_time) {
+                status = FASTDB_LIMIT_EXCEEDED;
+                break;
+            }
+            expiration = write_time + op->ttl_ms;
+        }
+        FDBRecord record = {op->key, op->value, ++sequence, expiration,
+                            op->kind == PUT ? FDB_PUT : FDB_DELETE};
         stages[i] = (StagedWrite){.record = record};
         if (journal != NULL)
             journal[i] = record;
         ++i;
     }
     size_t frame = 0;
-    if (journal != NULL)
+    if (status == FASTDB_OK && journal != NULL)
         status = fdb_disk_frame_size(db->disk, journal, count, &frame);
     if (status == FASTDB_OK)
         status = frame > spare ? FASTDB_LIMIT_EXCEEDED :
@@ -777,10 +791,54 @@ static FastDBStatus commit(FastDB *db, const Operation *op)
 FastDBStatus fastdb_put(FastDB *db, const void *key, size_t key_size,
                          const void *value, size_t value_size)
 {
+    return fastdb_put_with_ttl(db, key, key_size, value, value_size, 0);
+}
+
+FastDBStatus fastdb_put_with_ttl(FastDB *db, const void *key, size_t key_size,
+                                  const void *value, size_t value_size, uint64_t ttl_ms)
+{
     if (db == NULL)
         return FASTDB_INVALID_ARGUMENT;
-    const Operation op = {.kind = PUT, .key = {key, key_size}, .value = {value, value_size}};
+    const Operation op = {.kind = PUT, .key = {key, key_size},
+                          .value = {value, value_size}, .ttl_ms = ttl_ms};
     return commit(db, &op);
+}
+
+FastDBStatus fastdb_purge_expired(FastDB *db, size_t limit, size_t *removed)
+{
+    if (removed == NULL)
+        return FASTDB_INVALID_ARGUMENT;
+    *removed = 0;
+    if (db == NULL || limit == 0)
+        return FASTDB_INVALID_ARGUMENT;
+    if (limit > db->limits.max_batch_operations)
+        return FASTDB_LIMIT_EXCEEDED;
+    pthread_mutex_lock(&db->mutex);
+    FastDBStatus status;
+    uint64_t now = 0;
+    if (fdb_disk_poisoned(db->disk))
+        status = FASTDB_COMMIT_UNCERTAIN;
+    else if (fdb_disk_has_tables(db->disk))
+        status = FASTDB_UNSUPPORTED;
+    else
+        status = fdb_read_time(&now);
+    const FDBNode *node = fdb_tree_bound(&db->tree, (FastDBSlice){0}, false);
+    while (status == FASTDB_OK && node != NULL && *removed < limit) {
+        const FDBNode *next = fdb_tree_bound(&db->tree, node->record.key, true);
+        if (node->record.expires_at_ms != 0 && node->record.expires_at_ms <= now) {
+            if (db->sequence == UINT64_MAX) {
+                status = FASTDB_LIMIT_EXCEEDED;
+                break;
+            }
+            const Operation op = {.kind = DELETE, .key = node->record.key};
+            status = commit_writes(db, &op, 1);
+            if (status == FASTDB_OK)
+                ++*removed;
+        }
+        node = next;
+    }
+    pthread_mutex_unlock(&db->mutex);
+    return status;
 }
 
 FastDBStatus fastdb_delete(FastDB *db, const void *key, size_t key_size)
@@ -918,8 +976,14 @@ static FastDBStatus batch_add(FastDBBatch *batch, Operation op)
 FastDBStatus fastdb_batch_put(FastDBBatch *batch, const void *key, size_t key_size,
                                const void *value, size_t value_size)
 {
+    return fastdb_batch_put_with_ttl(batch, key, key_size, value, value_size, 0);
+}
+
+FastDBStatus fastdb_batch_put_with_ttl(FastDBBatch *batch, const void *key, size_t key_size,
+                                        const void *value, size_t value_size, uint64_t ttl_ms)
+{
     return batch_add(batch, (Operation){.kind = PUT, .key = {key, key_size},
-                                       .value = {value, value_size}});
+                                       .value = {value, value_size}, .ttl_ms = ttl_ms});
 }
 
 FastDBStatus fastdb_batch_delete(FastDBBatch *batch, const void *key, size_t key_size)
