@@ -24,6 +24,9 @@ typedef struct FDBBackgroundFlush {
     size_t waiters;
     uint64_t frozen_sequence;
     FastDBStatus error;
+    FastDBStatus compaction_error;
+    bool compaction_pending;
+    bool compaction_running;
     bool stopping;
 } FDBBackgroundFlush;
 

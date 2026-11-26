@@ -1,5 +1,6 @@
 #include "disk_fixture.h"
 #include "engine.h"
+#include "manifest.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -245,11 +246,75 @@ static void close_during_build(void)
     remove_disk_fixture(path);
 }
 
+static void wait_worker_maintenance(FastDB *db, uint64_t sequence)
+{
+    CHECK(pthread_mutex_lock(&db->mutex) == 0);
+    FDBBackgroundFlush *flush = db->flush;
+    while ((flush->frozen_sequence < sequence && flush->error == FASTDB_OK) ||
+           (flush->frozen.count != 0 && flush->error == FASTDB_OK) ||
+           flush->compaction_pending || flush->compaction_running)
+        CHECK(pthread_cond_wait(&flush->condition, &db->mutex) == 0);
+    CHECK(flush->error == FASTDB_OK && flush->compaction_error == FASTDB_OK);
+    CHECK(pthread_mutex_unlock(&db->mutex) == 0);
+}
+
+static size_t tables_at_level(const char *path, uint32_t level)
+{
+    FDBDirectory directory;
+    OK(fdb_dir_lock(path, NULL, &directory));
+    const FDBManifestLimits limits = {16, 2048, 32, 2};
+    FDBManifestLoad catalog;
+    OK(fdb_manifest_load(&directory, &limits, &catalog));
+    size_t count = 0;
+    for (size_t i = 0; i < catalog.view.count; ++i) {
+        if (catalog.view.entries[i].kind == FDB_FILE_SSTABLE &&
+            catalog.view.entries[i].level == level)
+            ++count;
+    }
+    fdb_manifest_release(&catalog);
+    OK(fdb_dir_close(&directory));
+    return count;
+}
+
+static void worker_schedules_compaction_after_flush(void)
+{
+    char path[] = "/tmp/fastdb-bg-compact.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = background_options(path);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    policy.level0_file_trigger = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    const char *first[] = {"a", "b", "c"};
+    for (size_t i = 0; i < 3; ++i)
+        OK(fastdb_put(db, first[i], 1, old_bytes.data, old_bytes.size));
+    wait_worker_maintenance(db, 3);
+    const char *second[] = {"d", "e", "f"};
+    for (size_t i = 0; i < 3; ++i)
+        OK(fastdb_put(db, second[i], 1, new_bytes.data, new_bytes.size));
+    wait_worker_maintenance(db, 6);
+    expect_value(db, (FastDBSlice){"a", 1}, old_bytes, 1);
+    expect_value(db, (FastDBSlice){"f", 1}, new_bytes, 6);
+    OK(fastdb_close(db));
+    CHECK(tables_at_level(path, 0) == 1);
+    CHECK(tables_at_level(path, 1) == 1);
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, old_bytes, 1);
+    expect_value(db, (FastDBSlice){"f", 1}, new_bytes, 6);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     concurrent_build(0);
     concurrent_build(ENOSPC);
     failed_rotation_keeps_active();
     close_during_build();
+    worker_schedules_compaction_after_flush();
     crash_during_build();
 }

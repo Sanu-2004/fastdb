@@ -76,3 +76,14 @@ failure and then flushes the active tree synchronously. Close signals the
 worker and joins it before releasing storage. In-flight work finishes or
 reports its error. Active records can remain recoverable in the WAL on clean
 close. LSM range and prefix scans remain pending.
+
+When the optional flush worker publishes an L0 table, it queues one automatic
+compaction on the same per-database worker. The worker tracks flush and
+compaction errors separately: a failed compaction does not mark a successfully
+published immutable table as failed or block foreground writes on the frozen
+tree error path. `fastdb_flush` waits for queued or active worker compaction
+before running its synchronous maintenance path. Close cancels a queued
+compaction and joins the worker; an active merge is allowed to finish before
+storage handles are released. This first increment keeps all SSTable
+maintenance exclusive, and does not permit concurrent L0 publication during a
+merge.

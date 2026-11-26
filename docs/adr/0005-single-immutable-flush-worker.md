@@ -23,3 +23,12 @@ slot is full, writers that reach the threshold can retry after it clears.
 Known worker errors retain readable records and can be retried with an
 explicit flush. Uncertain publication keeps the old references until
 reopen. The worker stops before the engine releases its storage handle.
+
+The optional worker also schedules at most one automatic compaction after a
+successful L0 flush. It uses the existing detached merge path, while retaining
+the single-maintenance exclusion. A queued compaction can be cancelled during
+close; a running merge is drained and joined. Flush publication errors and
+compaction errors are tracked separately because a successful flush remains
+authoritative even if the later compaction fails. A subsequent explicit flush
+can retry maintenance. Tests verify the level transition and reopen with one
+remaining L0 table and one L1 output when the L0 trigger is two.

@@ -212,8 +212,6 @@ static FastDBStatus flush_immutable(FastDB *db)
     if (status == FASTDB_OK)
         status = fdb_disk_flush_commit(db->disk, &flush->frozen, &output);
     fdb_flush_dispose(&output);
-    if (status == FASTDB_OK)
-        status = fdb_disk_compact(db, false, NULL);
     return status;
 }
 
@@ -223,12 +221,27 @@ static void *flush_worker(void *arg)
     FDBBackgroundFlush *flush = db->flush;
     pthread_mutex_lock(&db->mutex);
     while (!flush->stopping) {
+        if (flush->compaction_pending) {
+            flush->compaction_pending = false;
+            flush->compaction_running = true;
+            flush->compaction_error = fdb_disk_compact(db, false, NULL);
+            flush->compaction_running = false;
+            pthread_cond_broadcast(&flush->condition);
+            continue;
+        }
         if (flush->error != FASTDB_OK || flush->waiters != 0 || db->tree.bytes < flush->threshold ||
             fdb_disk_maintenance_waiting(db->disk)) {
             pthread_cond_wait(&flush->condition, &db->mutex);
             continue;
         }
         flush->error = flush_immutable(db);
+        if (flush->error == FASTDB_OK && !flush->stopping) {
+            flush->compaction_pending = true;
+            pthread_cond_broadcast(&flush->condition);
+            /* Let close cancel a queued job before it starts. */
+            pthread_mutex_unlock(&db->mutex);
+            pthread_mutex_lock(&db->mutex);
+        }
         pthread_cond_broadcast(&flush->condition);
     }
     pthread_mutex_unlock(&db->mutex);
@@ -300,22 +313,25 @@ FastDBStatus fastdb_close(FastDB *db)
     if (db == NULL)
         return FASTDB_INVALID_ARGUMENT;
     pthread_mutex_lock(&db->mutex);
+    FDBBackgroundFlush *flush = db->flush;
+    bool worker_compaction = flush != NULL && flush->compaction_running;
     if (db->iterator_count != 0 || fdb_disk_pinned_bytes(db->disk) != 0 ||
-        fdb_disk_compaction_bytes(db->disk) != 0) {
+        (fdb_disk_compaction_bytes(db->disk) != 0 && !worker_compaction)) {
         pthread_mutex_unlock(&db->mutex);
         return FASTDB_BUSY;
     }
     FastDBStatus maintenance = FASTDB_OK;
-    FDBBackgroundFlush *flush = db->flush;
     if (flush != NULL) {
         flush->stopping = true;
+        if (flush->compaction_pending)
+            flush->compaction_pending = false;
         pthread_cond_broadcast(&flush->condition);
     }
     pthread_mutex_unlock(&db->mutex);
     if (flush != NULL) {
         if (pthread_join(flush->worker, NULL) != 0)
             return FASTDB_BUSY;
-        maintenance = flush->error;
+        maintenance = flush->error != FASTDB_OK ? flush->error : flush->compaction_error;
         pthread_cond_destroy(&flush->condition);
         fdb_tree_destroy(&flush->frozen);
         free(flush);
@@ -360,7 +376,8 @@ FastDBStatus fastdb_flush(FastDB *db)
     FastDBStatus status = FASTDB_OK;
     if (flush != NULL) {
         ++flush->waiters;
-        while (flush->frozen.count != 0 && flush->error == FASTDB_OK)
+        while ((flush->frozen.count != 0 || flush->compaction_pending ||
+                flush->compaction_running) && flush->error == FASTDB_OK)
             pthread_cond_wait(&flush->condition, &db->mutex);
         --flush->waiters;
         if (flush->frozen.count != 0)
@@ -373,6 +390,8 @@ FastDBStatus fastdb_flush(FastDB *db)
     if (flush != NULL) {
         if (status != FASTDB_BUSY)
             flush->error = status;
+        if (status == FASTDB_OK)
+            flush->compaction_error = FASTDB_OK;
         pthread_cond_broadcast(&flush->condition);
     }
     pthread_mutex_unlock(&db->mutex);

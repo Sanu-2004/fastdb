@@ -355,3 +355,25 @@ performs a disk lookup, writes enough to rotate the WAL, and verifies
 `FASTDB_BUSY` for competing flush, compaction and close. It resumes the
 merge, writes again, and reopens to verify the new WAL data and masking
 tombstone.
+
+## Background compaction scheduling
+
+V046 rebuilt the clean `b8b3a71` starting checkpoint with GCC Debug and passed
+23 of 23 tests. V047 ran the full GCC Debug, Clang Release, and GCC
+ASan/UBSan/LSan matrix in a single disposable
+`fastdb-local-toolchain:bookworm` container with the repository bind-mounted
+read-only. Each configuration passed 23 of 23 tests. The expanded
+`fastdb_background_flush` case waits for the worker's completed sealed
+sequence, triggers compaction with an L0 threshold of two, checks one L0 and
+one L1 table after the single automatic pass, then reads the same values after
+reopen. The existing shutdown fixture still checks close during flush output
+construction. Direct close during queued/running compaction is not yet tested.
+TSan was not rerun because B004 remains active; this result is not a
+race-detector result.
+
+V048 ran `ctest --test-dir /tmp/p36-repeat -L concurrency --repeat
+until-fail:20 --output-on-failure` after a GCC Debug build. Each of the three
+concurrency-labeled suites passed 20 consecutive repetitions.
+
+V049 reran the full GCC Debug build and CTest after a final guard adjustment
+in the new fixture. All 23 tests passed.
