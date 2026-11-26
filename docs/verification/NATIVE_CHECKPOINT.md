@@ -580,3 +580,39 @@ ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37q-asan --output-on-failure
 Finally, `docker build -t fastdb-native:local .` succeeded and the Dockerfile's
 GCC 12.2 Release CTest passed 23/23. TSan was not run; see blocker B004 in
 `PROGRESS.md`.
+
+## Frozen-slot atomic batch backpressure
+
+V060 extends `tests/native/background_flush.c`. While the immutable slot is
+occupied and the active tree is at the flush threshold, a two-mutation batch
+(put `q`, put `r`) returns `FASTDB_BUSY`; both keys are checked absent and the
+existing stats assertion confirms the prior seven-record/revision-7 view is
+unchanged. The fixture retains that same batch handle across `fastdb_flush`,
+retries it successfully after the frozen slot is released, verifies revisions
+8 and 9, deletes `q`, and checks after reopen that `q` remains absent and `r`
+remains at revision 9. Both normal worker publication and the injected ENOSPC
+retry path execute this sequence. No engine change was needed; no partial
+batch commit was observed.
+
+Focused GCC Debug test: `fastdb_background_flush`, 1/1 passed. Full GCC Debug,
+Clang Release, and GCC ASan/UBSan/LSan CMake builds and CTest each passed 23/23
+in `fastdb-local-toolchain:bookworm`, using source mounted read-only at `/repo`
+and build directories `/tmp/p37b-gcc`, `/tmp/p37b-clang`, `/tmp/p37b-asan`.
+The command sequence was:
+
+```sh
+set -e
+CC=gcc cmake -S /repo -B /tmp/p37b-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37b-gcc --parallel
+ctest --test-dir /tmp/p37b-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p37b-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p37b-clang --parallel
+ctest --test-dir /tmp/p37b-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p37b-asan -DCMAKE_BUILD_TYPE=Debug -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37b-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37b-asan --output-on-failure
+```
+
+`docker build -t fastdb-native:local .` succeeded. Its GCC 12.2 Release build
+and CTest passed 23/23. Docker emitted only the known warning that `git.exe`
+was unavailable for build metadata. TSan was not run due to B004.

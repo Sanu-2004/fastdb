@@ -118,7 +118,7 @@ static void install_frozen(FastDB *db)
     OK(fastdb_put(db, "z", 1, old_bytes.data, old_bytes.size));
 }
 
-static void update_while_frozen(FastDB *db)
+static FastDBBatch *update_while_frozen(FastDB *db)
 {
     expect_value(db, (FastDBSlice){"k", 1}, old_bytes, 1);
     OK(fastdb_compare_and_swap(db, "k", 1, 1, new_bytes.data, new_bytes.size));
@@ -127,10 +127,18 @@ static void update_while_frozen(FastDB *db)
     /* This frame rotates the new active WAL while the worker owns an earlier output ID. */
     OK(fastdb_put(db, "y", 1, new_bytes.data, new_bytes.size));
     STATUS(fastdb_put(db, "q", 1, NULL, 0), FASTDB_BUSY);
+    FastDBBatch *batch;
+    OK(fastdb_batch_create(NULL, &batch));
+    OK(fastdb_batch_put(batch, "q", 1, new_bytes.data, new_bytes.size));
+    OK(fastdb_batch_put(batch, "r", 1, new_bytes.data, new_bytes.size));
+    STATUS(fastdb_batch_commit(db, batch), FASTDB_BUSY);
+    expect_missing(db, (FastDBSlice){"q", 1});
+    expect_missing(db, (FastDBSlice){"r", 1});
     STATUS(fastdb_compact(db), FASTDB_BUSY);
     FastDBStats stats;
     OK(fastdb_stats(db, &stats));
     CHECK(stats.record_count == 7 && stats.revision == 7 && stats.memory_bytes <= 128 * 1024);
+    return batch;
 }
 
 static void check_visible(FastDB *db)
@@ -156,7 +164,7 @@ static void concurrent_build(int error)
     OK(fdb_open_with_fs(options, &fs, &db));
     install_frozen(db);
     wait_for_gate(&gate);
-    update_while_frozen(db);
+    FastDBBatch *retry_batch = update_while_frozen(db);
     check_visible(db);
     release_gate(&gate);
     if (error != 0) {
@@ -170,8 +178,10 @@ static void concurrent_build(int error)
     }
     OK(fastdb_flush(db));
     check_visible(db);
-    OK(fastdb_put(db, "q", 1, new_bytes.data, new_bytes.size));
+    OK(fastdb_batch_commit(db, retry_batch));
+    fastdb_batch_destroy(retry_batch);
     expect_value(db, (FastDBSlice){"q", 1}, new_bytes, 8);
+    expect_value(db, (FastDBSlice){"r", 1}, new_bytes, 9);
     OK(fastdb_delete(db, "q", 1));
     expect_missing(db, (FastDBSlice){"q", 1});
     OK(fastdb_close(db));
@@ -181,6 +191,7 @@ static void concurrent_build(int error)
     OK(fastdb_open(options, &db));
     check_visible(db);
     expect_missing(db, (FastDBSlice){"q", 1});
+    expect_value(db, (FastDBSlice){"r", 1}, new_bytes, 9);
     OK(fastdb_close(db));
     fastdb_options_destroy(options);
     remove_disk_fixture(path);
@@ -204,7 +215,7 @@ static void crash_during_build(void)
         OK(fdb_open_with_fs(options, &fs, &db));
         install_frozen(db);
         wait_for_gate(&gate);
-        update_while_frozen(db);
+        fastdb_batch_destroy(update_while_frozen(db));
         CHECK(write(channel[1], "D", 1) == 1);
         for (;;)
             (void)pause();
@@ -276,7 +287,7 @@ static void close_during_build(void)
     OK(fdb_open_with_fs(options, &fs, &db));
     install_frozen(db);
     wait_for_gate(&gate);
-    update_while_frozen(db);
+    fastdb_batch_destroy(update_while_frozen(db));
     pthread_t closer;
     CHECK(pthread_create(&closer, NULL, close_db, db) == 0);
     CHECK(pthread_mutex_lock(&db->mutex) == 0);
