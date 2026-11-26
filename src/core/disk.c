@@ -414,8 +414,159 @@ static FastDBStatus find_entries(const FDBDisk *disk, const FDBManifestEntry *en
 FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
                            bool copy, FDBLookup *out)
 {
-    const FDBManifest *catalog = &disk->log.catalog.view;
+    return fdb_disk_find_view(disk, &disk->log.catalog.view, key, sequence, copy, out);
+}
+
+const FDBManifest *fdb_disk_catalog(const FDBDisk *disk)
+{
+    return fdb_disk_has_tables(disk) ? &disk->log.catalog.view : NULL;
+}
+
+FastDBStatus fdb_disk_copy_tables(const FDBDisk *disk, FDBManifestLoad *out, size_t *headroom)
+{
+    const FDBManifest *catalog = fdb_disk_catalog(disk);
+    if (catalog == NULL)
+        return FASTDB_OK;
+    size_t count = 0, bytes = 0;
+    for (size_t i = 0; i < catalog->count; ++i) {
+        const FDBManifestEntry *entry = &catalog->entries[i];
+        if (entry->kind != FDB_FILE_SSTABLE)
+            continue;
+        if (!fdb_add_size(bytes, sizeof(*entry), &bytes) ||
+            !fdb_add_size(bytes, entry->min_key.size, &bytes) ||
+            !fdb_add_size(bytes, entry->max_key.size, &bytes) || bytes > *headroom)
+            return FASTDB_LIMIT_EXCEEDED;
+        ++count;
+    }
+    if (count == 0)
+        return FASTDB_OK;
+    FDBManifestEntry *entries = malloc(bytes);
+    if (entries == NULL)
+        return FASTDB_OUT_OF_MEMORY;
+    unsigned char *keys = (unsigned char *)(entries + count);
+    size_t pos = 0;
+    for (size_t i = 0; i < catalog->count; ++i) {
+        if (catalog->entries[i].kind != FDB_FILE_SSTABLE)
+            continue;
+        entries[pos] = catalog->entries[i];
+        fdb_manifest_copy_bounds(&entries[pos++], &keys);
+    }
+    *out = (FDBManifestLoad){.view = {.count = count, .entries = entries}, .entries = entries};
+    *headroom -= bytes;
+    return FASTDB_OK;
+}
+
+void fdb_disk_snapshot_catalog(FDBDisk *disk, const FDBManifest *catalog)
+{
+    if (fdb_disk_has_tables(disk)) {
+        if (disk->log.snapshot_catalog != NULL && catalog == NULL)
+            disk->log.reclaim_pending = true;
+        disk->log.snapshot_catalog = catalog;
+    }
+}
+
+FastDBStatus fdb_disk_find_view(const FDBDisk *disk, const FDBManifest *catalog,
+                                FastDBSlice key, uint64_t sequence, bool copy, FDBLookup *out)
+{
     return find_entries(disk, catalog->entries, catalog->count, key, sequence, copy, out);
+}
+
+static FastDBStatus scan_open(const FDBDisk *disk, const FDBManifestEntry *file,
+                              FDBSSTReader **reader, FDBSSTIterator **iter)
+{
+    FastDBStatus status = fdb_catalog_open_table(&disk->dir, file, &disk->table, reader);
+    if (status == FASTDB_OK) {
+        status = fdb_sst_iter_open(*reader, iter);
+        if (status != FASTDB_OK)
+            (void)fdb_sst_reader_close(*reader);
+    }
+    return status;
+}
+
+static FastDBStatus scan_close(FDBSSTReader *reader, FDBSSTIterator *iter, FastDBStatus status)
+{
+    fdb_sst_iter_close(iter);
+    FastDBStatus closed = fdb_sst_reader_close(reader);
+    return status == FASTDB_OK ? closed : status;
+}
+
+static bool past_prefix(FastDBSlice key, FastDBSlice prefix)
+{
+    if (prefix.size == 0)
+        return false;
+    if (key.size > prefix.size)
+        key.size = prefix.size;
+    return fdb_compare(key, prefix) > 0;
+}
+
+FastDBStatus fdb_disk_scan_pick(const FDBDisk *disk, const FDBManifest *catalog, FastDBSlice lower,
+                                bool exclusive, FastDBSlice upper, FastDBSlice prefix,
+                                unsigned char *key_buffer, FDBScanCandidate *candidate)
+{
+    for (size_t i = 0; i < catalog->count; ++i) {
+        const FDBManifestEntry *file = &catalog->entries[i];
+        if (file->kind != FDB_FILE_SSTABLE)
+            continue;
+        int last = fdb_compare(file->max_key, lower);
+        if (last < 0 || (exclusive && last == 0) ||
+            (upper.size != 0 && fdb_compare(file->min_key, upper) >= 0) ||
+            past_prefix(file->min_key, prefix) ||
+            (candidate->record.key.size != 0 && fdb_compare(file->min_key, candidate->record.key) > 0))
+            continue;
+
+        FDBSSTReader *reader;
+        FDBSSTIterator *iter;
+        FastDBStatus status = scan_open(disk, file, &reader, &iter);
+        if (status != FASTDB_OK)
+            return status;
+        if (lower.size == 0)
+            fdb_sst_iter_first(iter);
+        else
+            fdb_sst_iter_seek(iter, lower);
+        const FDBRecord *record = fdb_sst_iter_current(iter);
+        while (exclusive && record != NULL && fdb_compare(record->key, lower) == 0) {
+            fdb_sst_iter_next(iter);
+            record = fdb_sst_iter_current(iter);
+        }
+        if (record != NULL && (upper.size == 0 || fdb_compare(record->key, upper) < 0)) {
+            int order = candidate->record.key.size == 0 ? -1 :
+                        fdb_compare(record->key, candidate->record.key);
+            if (order < 0 || (order == 0 && record->sequence > candidate->record.sequence)) {
+                memcpy(key_buffer, record->key.data, record->key.size);
+                candidate->record = *record;
+                candidate->record.key.data = key_buffer;
+                candidate->record.value.data = NULL;
+                candidate->file = file;
+            }
+        }
+        status = scan_close(reader, iter, fdb_sst_iter_status(iter));
+        if (status != FASTDB_OK)
+            return status;
+    }
+    return FASTDB_OK;
+}
+
+FastDBStatus fdb_disk_scan_copy(const FDBDisk *disk, const FDBScanCandidate *candidate,
+                                unsigned char *value)
+{
+    FDBSSTReader *reader;
+    FDBSSTIterator *iter;
+    FastDBStatus status = scan_open(disk, candidate->file, &reader, &iter);
+    if (status != FASTDB_OK)
+        return status;
+    const FDBRecord *expected = &candidate->record;
+    fdb_sst_iter_seek_version(iter, expected->key, expected->sequence);
+    const FDBRecord *record = fdb_sst_iter_current(iter);
+    status = fdb_sst_iter_status(iter);
+    if (status == FASTDB_OK) {
+        if (record == NULL || record->sequence != expected->sequence ||
+            record->kind != expected->kind || record->expires_at_ms != expected->expires_at_ms ||
+            record->value.size != expected->value.size)
+            status = FASTDB_CORRUPTION;
+        else if (record->value.size != 0)
+            memcpy(value, record->value.data, record->value.size);
+    }
+    return scan_close(reader, iter, status);
 }
 
 size_t fdb_disk_pinned_bytes(const FDBDisk *disk)

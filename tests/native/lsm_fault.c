@@ -301,6 +301,18 @@ static void flush_and_read_failure(void)
     bool exists = true;
     STATUS(fastdb_exists(db, "a", 1, &exists), FASTDB_IO_ERROR);
     CHECK(!exists);
+    injection = (Injection){.op = FDB_FS_READ, .countdown = 1};
+    FastDBIterator *page;
+    STATUS(fastdb_scan_prefix(db, (FastDBSlice){0}, 1, &page), FASTDB_IO_ERROR);
+    CHECK(page == NULL);
+    injection = (Injection){.op = FDB_FS_READ, .countdown = 1};
+    OK(fastdb_scan_prefix(db, (FastDBSlice){"0", 1}, 1, &page));
+    FastDBSlice key, value;
+    uint64_t revision;
+    STATUS(fastdb_iterator_next(page, &key, &value, &revision), FASTDB_NOT_FOUND);
+    CHECK(injection.countdown == 1);
+    fastdb_iterator_close(page);
+    injection = (Injection){0};
     expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"safe", 4}, 1);
     OK(fastdb_close(db));
     fastdb_options_destroy(options);

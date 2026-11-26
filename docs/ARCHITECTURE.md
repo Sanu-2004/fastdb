@@ -7,6 +7,11 @@ unsigned lexicographic ordering with a left-leaning red-black tree. `record.c`
 defines a checked binary record primitive. `scan.c` provides bounded,
 immutable pages of a coherent read view.
 
+`snapshot.c` captures active and frozen trees, the LSM table set, and the
+revision and read time under the database mutex. LSM maintenance may
+publish a later catalog while the snapshot retains its original files.
+See [ADR 0008](adr/0008-lsm-snapshots-and-bounded-pages.md).
+
 Each database owns its tree, revision counter, limits and mutex. Key ordering
 compares unsigned bytes and then lengths. Keys must be nonempty. Values can
 be empty. Every successful mutation consumes one positive revision, including

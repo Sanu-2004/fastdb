@@ -20,6 +20,20 @@ typedef struct FDBDiskRead {
     uint64_t sequence;
 } FDBDiskRead;
 
+struct FastDBSnapshot {
+    FastDB *db;
+    FDBTree active;
+    FDBTree frozen;
+    FDBManifestLoad catalog;
+    uint64_t revision;
+    uint64_t read_time;
+};
+
+typedef struct FDBScanCandidate {
+    FDBRecord record;
+    const FDBManifestEntry *file;
+} FDBScanCandidate;
+
 FastDBStatus fdb_lookup_record(const FDBRecord *record, bool copy, FDBLookup *out);
 FastDBStatus fdb_disk_validate(const FastDBOptions *options);
 FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs *fs,
@@ -33,6 +47,16 @@ FastDBStatus fdb_disk_frame_size(const FDBDisk *disk, const FDBRecord *records,
 FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count);
 FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
                            bool copy, FDBLookup *out);
+const FDBManifest *fdb_disk_catalog(const FDBDisk *disk);
+FastDBStatus fdb_disk_copy_tables(const FDBDisk *disk, FDBManifestLoad *out, size_t *headroom);
+void fdb_disk_snapshot_catalog(FDBDisk *disk, const FDBManifest *catalog);
+FastDBStatus fdb_disk_find_view(const FDBDisk *disk, const FDBManifest *catalog,
+                                FastDBSlice key, uint64_t sequence, bool copy, FDBLookup *out);
+FastDBStatus fdb_disk_scan_pick(const FDBDisk *disk, const FDBManifest *catalog, FastDBSlice lower,
+                                bool exclusive, FastDBSlice upper, FastDBSlice prefix,
+                                unsigned char *key_buffer, FDBScanCandidate *candidate);
+FastDBStatus fdb_disk_scan_copy(const FDBDisk *disk, const FDBScanCandidate *candidate,
+                                unsigned char *value);
 size_t fdb_disk_pinned_bytes(const FDBDisk *disk);
 bool fdb_disk_maintenance_waiting(const FDBDisk *disk);
 /* Capture/release under the engine mutex. BUSY permits a serialized lookup instead. */

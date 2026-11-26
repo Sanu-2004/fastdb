@@ -1,6 +1,27 @@
 #include "record.h"
 
 #include <string.h>
+#include <time.h>
+
+FastDBStatus fdb_read_time(uint64_t *milliseconds)
+{
+    struct timespec now;
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC)
+        return FASTDB_IO_ERROR;
+    *milliseconds = 0;
+    if (now.tv_sec >= 0) {
+        uint64_t seconds = (uint64_t)now.tv_sec;
+        uint64_t fraction = (uint64_t)(now.tv_nsec / 1000000);
+        *milliseconds = seconds > (UINT64_MAX - fraction) / 1000 ?
+                        UINT64_MAX : seconds * 1000 + fraction;
+    }
+    return FASTDB_OK;
+}
+
+bool fdb_record_visible(FDBRecordKind kind, uint64_t expires_at_ms, uint64_t read_time)
+{
+    return kind == FDB_PUT && (expires_at_ms == 0 || expires_at_ms > read_time);
+}
 
 int fdb_compare(FastDBSlice a, FastDBSlice b)
 {

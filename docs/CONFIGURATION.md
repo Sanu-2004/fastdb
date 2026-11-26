@@ -25,11 +25,17 @@ node without allocating. When a page exceeds its byte budget, the scan
 returns `FASTDB_LIMIT_EXCEEDED`; retrying with a smaller record count may help.
 A record larger than a whole page remains accessible through GET.
 
-The two memory modes allow one open snapshot per database. Capture returns
+All storage modes allow one open snapshot per database. Capture returns
 `FASTDB_LIMIT_EXCEEDED` if the snapshot slot is occupied or if the copy
 would exceed remaining memory headroom. Snapshot bytes appear in
 `FastDBStats.memory_bytes` and reduce headroom for writes and scan pages
 until release.
+
+In LSM mode a snapshot pins up to one catalog's worth of SSTables. Flush
+and compaction can continue. Only captured SSTables are retained after
+retirement. Release makes those files eligible for cleanup on the next
+maintenance operation or close. An LSM page also budgets two key buffers
+of at most `max_key_bytes` each and uses the reserved table reader workspace.
 
 To configure persistence, initialize `FastDBPersistentOptions` with
 `fastdb_persistent_options_default`, then pass it to `fastdb_options_set_storage`

@@ -168,8 +168,8 @@ FASTDB_API FastDBStatus fastdb_batch_expect(FastDBBatch *batch, const void *key,
                                            size_t key_size, uint64_t expected);
 FASTDB_API FastDBStatus fastdb_batch_commit(FastDB *db, const FastDBBatch *batch);
 
-/* One immutable snapshot per memory-mode database, charged to max_memory_bytes.
- * Release it before closing the database. LSM capture returns FASTDB_UNSUPPORTED. */
+/* One immutable snapshot per database, charged to max_memory_bytes.
+ * Release it before closing the database. */
 FASTDB_API FastDBStatus fastdb_snapshot_create(FastDB *db, FastDBSnapshot **out);
 /* The capture revision, or zero for a NULL snapshot. */
 FASTDB_API uint64_t fastdb_snapshot_revision(const FastDBSnapshot *snapshot);
@@ -179,6 +179,12 @@ FASTDB_API FastDBStatus fastdb_snapshot_get(const FastDBSnapshot *snapshot, cons
                                            uint64_t *revision);
 /* Quiesce readers of this snapshot before releasing it. */
 FASTDB_API void fastdb_snapshot_release(FastDBSnapshot *snapshot);
+FASTDB_API FastDBStatus fastdb_snapshot_scan_range(const FastDBSnapshot *snapshot,
+                                                  const FastDBRange *range, size_t limit,
+                                                  FastDBIterator **out);
+FASTDB_API FastDBStatus fastdb_snapshot_scan_prefix(const FastDBSnapshot *snapshot,
+                                                   FastDBSlice prefix, size_t limit,
+                                                   FastDBIterator **out);
 
 /* A NULL/zero slice leaves a range bound open. The upper bound is exclusive. */
 FASTDB_API FastDBStatus fastdb_scan_range(FastDB *db, const FastDBRange *range,

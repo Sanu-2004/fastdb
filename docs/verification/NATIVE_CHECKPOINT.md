@@ -876,3 +876,44 @@ CC=gcc cmake -S /repo -B /tmp/p38-tsan -DCMAKE_BUILD_TYPE=Debug \
 cmake --build /tmp/p38-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p38-tsan -L concurrency --repeat until-fail:5 --output-on-failure
 ```
+
+## P3.8 completion with retained catalog and merged scans (V068)
+
+The new snapshot scan tests were added first. Building the new
+`fastdb_snapshot` target in `/tmp/p38-red` failed to link the two missing
+snapshot scan entry points. The first implementation build found a duplicate
+internal snapshot type. After correcting it, the GCC Debug suite in
+`/tmp/p38-green` passed 24/24.
+
+The final cases verify stable pages after an atomic update and compaction,
+snapshot reads from a frozen tree after publication and retry, SSTable pin
+cleanup, binary prefix/range pagination, tombstone masking, independent
+page lifetime, combined memory admission, and scan I/O error propagation.
+The out-of-range prefix case verifies that the unrelated table reader is
+never called. The tests use the V064 Docker toolchain and a read-only source
+mount.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p38-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p38-red --target fastdb_snapshot fastdb_lsm --parallel
+CC=gcc cmake -S /repo -B /tmp/p38-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p38-gcc --parallel
+ctest --test-dir /tmp/p38-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p38-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p38-clang --parallel
+ctest --test-dir /tmp/p38-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p38-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p38-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p38-asan --output-on-failure
+```
+
+All final full CTest profiles passed 24/24. `docker build -t
+fastdb-native:local .` succeeded with 24/24 Release tests. For the V062 TSan
+setup, configuring `/tmp/p38-tsan` with GCC Debug,
+`-DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie`, building in
+parallel and running the command below passed 20 executions.
+
+```sh
+setarch x86_64 -R ctest --test-dir /tmp/p38-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```

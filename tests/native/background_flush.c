@@ -162,6 +162,11 @@ static void concurrent_build(int error)
     wait_for_gate(&gate);
     FastDBBatch *retry_batch = update_while_frozen(db);
     check_visible(db);
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    CHECK(fastdb_snapshot_revision(snapshot) == 7);
+    FastDBIterator *page;
+    OK(fastdb_snapshot_scan_prefix(snapshot, (FastDBSlice){0}, 8, &page));
     release_gate(&gate);
     if (error != 0) {
         CHECK(pthread_mutex_lock(&db->mutex) == 0);
@@ -180,6 +185,25 @@ static void concurrent_build(int error)
     expect_value(db, (FastDBSlice){"r", 1}, new_bytes, 9);
     OK(fastdb_delete(db, "q", 1));
     expect_missing(db, (FastDBSlice){"q", 1});
+    void *captured;
+    size_t captured_size;
+    uint64_t captured_revision;
+    OK(fastdb_snapshot_get(snapshot, "z", 1, &captured, &captured_size, &captured_revision));
+    CHECK(captured_size == old_bytes.size && captured_revision == 3 &&
+          memcmp(captured, old_bytes.data, captured_size) == 0);
+    fastdb_free(captured);
+    const char keys[] = {'k', 'x', 'y', 'z'};
+    const uint64_t revisions[] = {4, 6, 7, 3};
+    FastDBSlice key, value;
+    uint64_t revision;
+    for (size_t i = 0; i < sizeof(keys); ++i) {
+        OK(fastdb_iterator_next(page, &key, &value, &revision));
+        CHECK(key.size == 1 && *(const char *)key.data == keys[i] && revision == revisions[i]);
+    }
+    CHECK(!fastdb_iterator_has_more(page));
+    STATUS(fastdb_iterator_next(page, &key, &value, &revision), FASTDB_NOT_FOUND);
+    fastdb_iterator_close(page);
+    fastdb_snapshot_release(snapshot);
     OK(fastdb_close(db));
     CHECK(pthread_cond_destroy(&gate.condition) == 0);
     CHECK(pthread_mutex_destroy(&gate.mutex) == 0);

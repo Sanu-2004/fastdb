@@ -56,8 +56,15 @@ static void reopen_and_flush(void)
     OK(fastdb_stats(db, &stats));
     CHECK(stats.revision == 11 && stats.record_count == 2 && stats.memory_bytes <= 128 * 1024);
     FastDBIterator *it;
-    STATUS(fastdb_scan_prefix(db, (FastDBSlice){0}, 1, &it), FASTDB_UNSUPPORTED);
-    CHECK(it == NULL);
+    OK(fastdb_scan_prefix(db, (FastDBSlice){0}, 1, &it));
+    FastDBSlice key, value;
+    uint64_t revision;
+    CHECK(fastdb_iterator_has_more(it));
+    OK(fastdb_iterator_next(it, &key, &value, &revision));
+    CHECK(key.size == 1 && memcmp(key.data, empty.data, 1) == 0 &&
+          value.size == 0 && revision == 2);
+    STATUS(fastdb_iterator_next(it, &key, &value, &revision), FASTDB_NOT_FOUND);
+    fastdb_iterator_close(it);
     OK(fastdb_flush(db));
     OK(fastdb_stats(db, &stats));
     CHECK(stats.revision == 11 && stats.record_count == 0);

@@ -12,6 +12,7 @@ typedef struct FDBWalSet {
     size_t active_index;
     size_t corrupt_filter_partitions;
     size_t pinned_read_bytes;
+    const FDBManifest *snapshot_catalog;
     bool reclaim_pending;
     bool poisoned;
     bool compaction_outputs_reserved;

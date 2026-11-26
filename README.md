@@ -2,8 +2,8 @@
 
 FastDB is a native C17 key-value storage engine with in-memory,
 persistent-memory, and LSM modes. All three support binary keys and
-values, revisions, and conditional atomic batches. The memory modes also
-support bounded range and prefix scans.
+values, revisions, conditional atomic batches, bounded range and prefix
+scans, and immutable snapshots.
 Native LSM callers can enable a background flush worker through the
 [configuration API](docs/CONFIGURATION.md).
 

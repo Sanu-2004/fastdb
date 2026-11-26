@@ -2,6 +2,25 @@
 
 #include <pthread.h>
 
+static void page_row(FastDBIterator *page, FastDBSlice key, FastDBSlice value, uint64_t revision)
+{
+    FastDBSlice actual_key, actual_value;
+    uint64_t sequence;
+    OK(fastdb_iterator_next(page, &actual_key, &actual_value, &sequence));
+    CHECK(actual_key.size == key.size && memcmp(actual_key.data, key.data, key.size) == 0);
+    CHECK(actual_value.size == value.size && sequence == revision);
+    CHECK(value.size == 0 || memcmp(actual_value.data, value.data, value.size) == 0);
+}
+
+static void page_end(FastDBIterator *page, bool more)
+{
+    FastDBSlice key, value;
+    uint64_t revision;
+    STATUS(fastdb_iterator_next(page, &key, &value, &revision), FASTDB_NOT_FOUND);
+    CHECK(fastdb_iterator_has_more(page) == more);
+    fastdb_iterator_close(page);
+}
+
 static void snapshot_value(const FastDBSnapshot *snapshot, FastDBSlice key,
                            FastDBSlice expected, uint64_t revision)
 {
@@ -45,7 +64,16 @@ static void checkpoint_snapshot(void)
     uint64_t revision = 1;
     STATUS(fastdb_snapshot_get(snapshot, "added", 5, &out, &size, &revision), FASTDB_NOT_FOUND);
     CHECK(out == NULL && size == 0 && revision == 0);
+    FastDBIterator *page;
+    OK(fastdb_snapshot_scan_prefix(snapshot, (FastDBSlice){binary, 2}, 1, &page));
+    page_row(page, (FastDBSlice){binary, sizeof(binary)}, (FastDBSlice){"old", 3}, 1);
+    page_end(page, false);
+    const FastDBRange rest = {.start = {binary, sizeof(binary)}, .start_exclusive = true};
+    OK(fastdb_snapshot_scan_range(snapshot, &rest, 1, &page));
     fastdb_snapshot_release(snapshot);
+    STATUS(fastdb_close(db), FASTDB_BUSY);
+    page_row(page, (FastDBSlice){"empty", 5}, (FastDBSlice){0}, 2);
+    page_end(page, false);
     OK(fastdb_close(db));
     OK(fastdb_open(options, &db));
     expect_value(db, (FastDBSlice){binary, sizeof(binary)}, (FastDBSlice){"new", 3}, 3);
@@ -90,6 +118,10 @@ static void snapshot_admission(void)
         } else {
             OK(fastdb_snapshot_create(db, &snapshot));
             STATUS(fastdb_put(db, "b", 1, NULL, 0), FASTDB_LIMIT_EXCEEDED);
+            FastDBIterator *page;
+            STATUS(fastdb_snapshot_scan_prefix(snapshot, (FastDBSlice){0}, 1, &page),
+                   FASTDB_LIMIT_EXCEEDED);
+            CHECK(page == NULL);
             fastdb_snapshot_release(snapshot);
             OK(fastdb_put(db, "b", 1, NULL, 0));
         }
@@ -155,16 +187,85 @@ static void snapshot_atomicity(void)
     OK(fastdb_close(writer.db));
 }
 
-static void lsm_snapshot_unsupported(void)
+static size_t table_count(const char *path)
+{
+    DIR *directory = opendir(path);
+    CHECK(directory != NULL);
+    size_t count = 0;
+    const struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strncmp(entry->d_name, "sst-", 4) == 0)
+            ++count;
+    }
+    CHECK(closedir(directory) == 0);
+    return count;
+}
+
+static void lsm_snapshot_and_merged_pages(void)
 {
     char path[] = "/tmp/fastdb-lsm-snapshot.XXXXXXXX";
     CHECK(mkdtemp(path) != NULL);
     FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
     FastDB *db;
     OK(fastdb_open(options, &db));
+    const FastDBSlice a = {"a", 1}, binary = {"a\0\xff", 3}, b = {"b", 1}, c = {"c", 1};
+    const FastDBSlice old = {"old", 3}, new = {"new", 3};
+    OK(fastdb_put(db, a.data, a.size, old.data, old.size));
+    OK(fastdb_put(db, binary.data, binary.size, NULL, 0));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    OK(fastdb_put(db, b.data, b.size, old.data, old.size));
+    OK(fastdb_put(db, a.data, a.size, new.data, new.size));
+    OK(fastdb_flush(db));
+    OK(fastdb_delete(db, b.data, b.size));
+    OK(fastdb_put(db, c.data, c.size, NULL, 0));
     FastDBSnapshot *snapshot;
-    STATUS(fastdb_snapshot_create(db, &snapshot), FASTDB_UNSUPPORTED);
-    CHECK(snapshot == NULL);
+    OK(fastdb_snapshot_create(db, &snapshot));
+    CHECK(fastdb_snapshot_revision(snapshot) == 6);
+
+    FastDBBatch *batch;
+    OK(fastdb_batch_create(options, &batch));
+    OK(fastdb_batch_delete(batch, a.data, a.size));
+    OK(fastdb_batch_put(batch, b.data, b.size, new.data, new.size));
+    OK(fastdb_batch_commit(db, batch));
+    fastdb_batch_destroy(batch);
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    CHECK(table_count(path) > 1);
+    snapshot_value(snapshot, a, new, 4);
+    snapshot_value(snapshot, binary, (FastDBSlice){0}, 2);
+    void *value;
+    size_t size;
+    uint64_t revision;
+    STATUS(fastdb_snapshot_get(snapshot, b.data, b.size, &value, &size, &revision), FASTDB_NOT_FOUND);
+    CHECK(value == NULL && size == 0 && revision == 0);
+
+    FastDBIterator *page;
+    OK(fastdb_snapshot_scan_prefix(snapshot, a, 1, &page));
+    page_row(page, a, new, 4);
+    page_end(page, true);
+    const FastDBRange rest = {.start = a, .end = {"d", 1}, .start_exclusive = true};
+    OK(fastdb_snapshot_scan_range(snapshot, &rest, 2, &page));
+    page_row(page, binary, (FastDBSlice){0}, 2);
+    page_row(page, c, (FastDBSlice){0}, 6);
+    page_end(page, false);
+    OK(fastdb_scan_range(db, &rest, 4, &page));
+    page_row(page, binary, (FastDBSlice){0}, 2);
+    page_row(page, b, new, 8);
+    page_row(page, c, (FastDBSlice){0}, 6);
+    page_end(page, false);
+    STATUS(fastdb_close(db), FASTDB_BUSY);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_flush(db));
+    CHECK(table_count(path) == 1);
+    OK(fastdb_close(db));
+    OK(fastdb_open(options, &db));
+    expect_missing(db, a);
+    expect_value(db, b, new, 8);
     OK(fastdb_close(db));
     fastdb_options_destroy(options);
     remove_disk_fixture(path);
@@ -175,5 +276,5 @@ int main(void)
     checkpoint_snapshot();
     snapshot_admission();
     snapshot_atomicity();
-    lsm_snapshot_unsupported();
+    lsm_snapshot_and_merged_pages();
 }

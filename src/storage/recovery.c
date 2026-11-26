@@ -145,6 +145,9 @@ static FastDBStatus reclaim_file(void *context, const char *name)
                              file.id < reclaim->set->compaction_output_end;
     if (compaction_output)
         return FASTDB_OK;
+    if (reclaim->set->snapshot_catalog != NULL &&
+        referenced(reclaim->set->snapshot_catalog, file))
+        return FASTDB_OK;
     if (!manifest_temp &&
         (file.id == 0 || file.id >= manifest->next_file_id || referenced(manifest, file)))
         return FASTDB_OK;

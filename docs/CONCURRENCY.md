@@ -6,8 +6,7 @@ linearize at the final revision publication inside that critical section.
 Persistent commits preallocate their replacement nodes and stage the
 complete WAL frame before exposing mutations. GET, exists and stats
 linearize at their locked observation or the capture of a pinned catalog.
-Memory-mode and persistent-memory
-scan pages linearize during locked construction and own their copies.
+Live scan pages linearize during locked construction and own their copies.
 
 All batch checks use the pre-batch read view, including checks listed after
 mutations. Multiple mutations of one key consume separate revisions in order.
@@ -31,21 +30,31 @@ open. An empty prefix matches all keys. `fastdb_iterator_next` returns
 that page opened. The last key can be used as an exclusive lower bound for
 the next range page. Independently opened pages see independent read views.
 
-In memory and persistent memory mode, `fastdb_snapshot_create` copies the
-ordered tree under the same mutex used for batch publication. The snapshot
-captures the committed revision and UTC read time in that critical section.
-A snapshot can therefore see a batch entirely before or entirely after its
-publication. Capture takes time proportional to the number of nodes and
-bytes copied. The initial limit is one snapshot per database, with the
-handle and tree charged to the database memory budget.
+`fastdb_snapshot_create` copies the active tree, any frozen tree, and LSM
+table entries under the same mutex used for batch publication. It captures
+the committed revision and UTC read time in that critical section. A
+snapshot sees a batch entirely before or entirely after its publication.
+Capture takes time proportional to the nodes, keys and catalog bytes
+copied. Each database admits one snapshot and charges its allocations to
+the database memory budget.
 
 `fastdb_snapshot_get` compares any stored expiration to the captured time
 and returns an owned copy and the record's original revision. A later
 write, delete or checkpoint can proceed while readers use the immutable
 copy. Callers may read one snapshot concurrently and must quiesce its
 readers before calling `fastdb_snapshot_release`. Release returns the memory
-charge under the database mutex. Snapshot capture currently returns
-`FASTDB_UNSUPPORTED` in LSM mode. The initial snapshot API supports point reads.
+charge under the database mutex. Snapshot point reads from copied trees
+can run without the mutex. Point reads from captured SSTables use the
+serialized reader workspace.
+
+Snapshot range and prefix pages read the same captured revision and
+expiration time. Pages hold independent copies and may outlive the
+snapshot. LSM pages merge active, frozen and table candidates under the
+mutex. The highest revision for a key wins before expiration and tombstone
+filtering. Page construction uses one table reader at a time and repeats
+seeks when measuring and copying the page. Wide scans can hold the mutex
+longer than point reads. This keeps memory and descriptor usage bounded
+while a streaming scan cursor remains a performance improvement.
 
 The owner must prevent new operations and quiesce existing operations before
 calling close. A database with open iterators, a live snapshot or an
@@ -103,7 +112,7 @@ worker is compacting.
 failure and then flushes the active tree synchronously. Close signals the
 worker and joins it before releasing storage. In-flight work finishes or
 reports its error. Active records can remain recoverable in the WAL on clean
-close. LSM range and prefix scans remain pending.
+close.
 
 When the optional flush worker publishes an L0 table, it queues one automatic
 compaction on the same per-database worker. The worker tracks flush and
