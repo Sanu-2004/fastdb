@@ -25,6 +25,7 @@ struct FDBDisk {
     bool compaction_cleanup_needed;
     bool compaction_flush_allowed;
     uint64_t min_free_bytes;
+    size_t max_open_files;
 };
 
 static const FastDBPersistentOptions defaults = {
@@ -38,6 +39,7 @@ static const FastDBPersistentOptions defaults = {
     .max_catalog_bytes = 512 * 1024,
     .bloom_bits_per_key = 10,
     .min_free_bytes = 0,
+    .max_open_files = 256,
 };
 
 void fastdb_persistent_options_default(FastDBPersistentOptions *options)
@@ -78,8 +80,10 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     const FastDBPersistentOptions *storage = &options->storage;
     const FastDBLimits *limits = &options->limits;
     size_t record, block;
+    size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 8 : 4;
     if ((storage->durability != FASTDB_DURABILITY_SYNC && storage->durability != FASTDB_DURABILITY_ASYNC) ||
         storage->max_catalog_files < 2 ||
+        storage->max_open_files < minimum_open_files ||
         storage->checkpoint_wal_segments >= storage->max_catalog_files ||
         (options->mode == FASTDB_MODE_LSM && storage->checkpoint_wal_segments != 0))
         return FASTDB_INVALID_ARGUMENT;
@@ -115,6 +119,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     disk->mode = options->mode;
     disk->durability = storage->durability;
     disk->min_free_bytes = storage->min_free_bytes;
+    disk->max_open_files = storage->max_open_files;
     size_t default_segments = storage->max_catalog_files <= 8 ? storage->max_catalog_files - 1 : 8;
     disk->checkpoint_wal_segments = storage->checkpoint_wal_segments == 0 ?
                                     default_segments : storage->checkpoint_wal_segments;
@@ -154,6 +159,15 @@ FastDBStatus fdb_disk_validate(const FastDBOptions *options)
     FDBDisk disk;
     size_t workspace;
     return settings(options, &disk, &workspace);
+}
+
+size_t fdb_disk_compaction_fan_in(size_t max_open_files, size_t configured_max)
+{
+    const size_t reserved = 6;
+    if (max_open_files <= reserved)
+        return 0;
+    size_t available = max_open_files - reserved;
+    return configured_max < available ? configured_max : available;
 }
 
 typedef struct DirectoryContents {
@@ -563,6 +577,10 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
     size_t affordable = available > disk->writer_bytes ?
                         (available - disk->writer_bytes) / input_bytes : 0;
     FDBCompactionPolicy policy = disk->policy;
+    size_t descriptor_fan_in = fdb_disk_compaction_fan_in(disk->max_open_files,
+                                                          policy.max_inputs);
+    if (policy.max_inputs > descriptor_fan_in)
+        policy.max_inputs = descriptor_fan_in;
     if (policy.max_inputs > disk->log.catalog.view.count)
         policy.max_inputs = disk->log.catalog.view.count;
     if (policy.max_inputs > affordable)

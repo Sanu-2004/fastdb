@@ -475,3 +475,22 @@ CC=gcc cmake -S /repo -B /tmp/p37-asan -DCMAKE_BUILD_TYPE=Debug \
 cmake --build /tmp/p37-asan --parallel
 ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37-asan --output-on-failure
 ```
+
+## Per-database compaction descriptor budget
+
+V056 began from commit `2963f5c`. The source tree was mounted read-only at
+`/repo` in `fastdb-local-toolchain:bookworm`; GCC 12.2 Debug, Clang 14
+Release, and GCC ASan/UBSan/LSan each built and passed the full 23-test
+CTest suite. Build directories were `/tmp/p37fd-gcc`, `/tmp/p37fd-clang`,
+and `/tmp/p37fd-asan` respectively. The `fastdb_lsm_fault` regression checks
+that persistent-memory `max_open_files` 3 is rejected and 4 accepted, LSM 7
+is rejected and 8 accepted, and fan-in is clamped correctly after six
+reserved descriptors.
+
+The final source tree was also built with `docker build -t
+fastdb-native:local .`. The Dockerfile's GCC 12.2 Release CTest passed 23/23
+before the image was installed. The build succeeded; Docker reported a
+non-fatal warning that `git.exe` was unavailable for build metadata. The
+six-slot reservation is documented in `docs/CONFIGURATION.md`; the option
+limits compaction readers per database and is not a process-wide descriptor
+limit. TSan remains unavailable as recorded under blocker B004.

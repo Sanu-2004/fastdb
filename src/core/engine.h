@@ -15,6 +15,8 @@ struct FastDBOptions {
 };
 
 typedef struct FDBDisk FDBDisk;
+/* Internal budget helper shared with native resource tests. */
+size_t fdb_disk_compaction_fan_in(size_t max_open_files, size_t configured_max);
 
 typedef struct FDBBackgroundFlush {
     FDBTree frozen;

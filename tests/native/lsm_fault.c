@@ -19,6 +19,37 @@ static size_t table_file_count(const char *path)
     return count;
 }
 
+static void descriptor_budget_validation(void)
+{
+    char path[] = "/tmp/fastdb-fd-budget.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options_with_mode(path, FASTDB_MODE_MEMORY_PERSISTENT,
+                                                      FASTDB_DURABILITY_SYNC);
+    FastDBPersistentOptions settings;
+    fastdb_persistent_options_default(&settings);
+    settings.max_wal_segment_bytes = 410;
+    settings.max_wal_frame_bytes = 360;
+    settings.target_block_bytes = 80;
+    settings.max_index_bytes = 1024;
+    settings.max_filter_bytes = 320;
+    settings.max_catalog_files = 16;
+    settings.max_catalog_bytes = 2048;
+    settings.checkpoint_wal_segments = 2;
+    settings.max_open_files = 3;
+    STATUS(fastdb_options_set_storage(options, FASTDB_MODE_MEMORY_PERSISTENT, path, &settings),
+           FASTDB_INVALID_ARGUMENT);
+    settings.max_open_files = 4;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_MEMORY_PERSISTENT, path, &settings));
+    fastdb_options_destroy(options);
+    CHECK(rmdir(path) == 0);
+
+    CHECK(fdb_disk_compaction_fan_in(6, 8) == 0);
+    CHECK(fdb_disk_compaction_fan_in(7, 8) == 1);
+    CHECK(fdb_disk_compaction_fan_in(8, 8) == 2);
+    CHECK(fdb_disk_compaction_fan_in(10, 8) == 4);
+    CHECK(fdb_disk_compaction_fan_in(10, 3) == 3);
+}
+
 typedef struct Injection {
     FDBFsOp op;
     size_t countdown;
@@ -52,6 +83,10 @@ static void low_space_admission(void)
     settings.max_catalog_files = 16;
     settings.max_catalog_bytes = 2048;
     settings.min_free_bytes = 1024;
+    settings.max_open_files = 7;
+    STATUS(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings),
+           FASTDB_INVALID_ARGUMENT);
+    settings.max_open_files = 8;
     OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings));
 
     Injection injection = {.op = FDB_FS_SPACE, .available_bytes = 1024,
@@ -274,6 +309,7 @@ static void compaction_failure(FDBFsOp op, size_t countdown, FastDBStatus failur
 
 int main(void)
 {
+    descriptor_budget_validation();
     low_space_admission();
     sync_failure();
     flush_and_read_failure();
