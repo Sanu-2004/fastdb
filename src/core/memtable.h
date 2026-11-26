@@ -25,5 +25,6 @@ const FDBNode *fdb_tree_bound(const FDBTree *tree, FastDBSlice key, bool exclusi
 void fdb_tree_put(FDBTree *tree, FDBNode *node);
 void fdb_tree_delete(FDBTree *tree, FastDBSlice key);
 void fdb_tree_destroy(FDBTree *tree);
+FastDBStatus fdb_tree_clone(const FDBTree *source, FDBTree *out);
 
 #endif

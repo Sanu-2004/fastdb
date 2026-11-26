@@ -9,7 +9,7 @@ and can be freed afterward. Pass `NULL` to open or batch creation to use default
 |---|---:|---|
 | `max_key_bytes` | 65,536 | One nonempty key |
 | `max_value_bytes` | 16 MiB | One value |
-| `max_memory_bytes` | 64 MiB | DB handle, tree nodes, copied pages and transient commit allocations |
+| `max_memory_bytes` | 64 MiB | DB handle, tree nodes, copied pages, snapshot copies and transient commit allocations |
 | `max_batch_operations` | 10,000 | Mutations plus conditions in one batch |
 | `max_batch_bytes` | 32 MiB | One batch handle, copied inputs and per-entry metadata |
 | `max_scan_records` | 10,000 | Requested record count per scan page |
@@ -24,6 +24,12 @@ current value and its staged replacement must coexist. Delete releases a
 node without allocating. When a page exceeds its byte budget, the scan
 returns `FASTDB_LIMIT_EXCEEDED`; retrying with a smaller record count may help.
 A record larger than a whole page remains accessible through GET.
+
+The two memory modes allow one open snapshot per database. Capture returns
+`FASTDB_LIMIT_EXCEEDED` if the snapshot slot is occupied or if the copy
+would exceed remaining memory headroom. Snapshot bytes appear in
+`FastDBStats.memory_bytes` and reduce headroom for writes and scan pages
+until release.
 
 To configure persistence, initialize `FastDBPersistentOptions` with
 `fastdb_persistent_options_default`, then pass it to `fastdb_options_set_storage`

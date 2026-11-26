@@ -315,7 +315,8 @@ FastDBStatus fastdb_close(FastDB *db)
     pthread_mutex_lock(&db->mutex);
     FDBBackgroundFlush *flush = db->flush;
     bool worker_compaction = flush != NULL && flush->compaction_running;
-    if (db->iterator_count != 0 || fdb_disk_pinned_bytes(db->disk) != 0 ||
+    if (db->iterator_count != 0 || db->snapshot_bytes != 0 ||
+        fdb_disk_pinned_bytes(db->disk) != 0 ||
         (fdb_disk_compaction_bytes(db->disk) != 0 && !worker_compaction)) {
         pthread_mutex_unlock(&db->mutex);
         return FASTDB_BUSY;
@@ -348,7 +349,7 @@ FastDBStatus fastdb_close(FastDB *db)
 size_t fdb_memory_bytes(const FastDB *db)
 {
     size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
-    return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes +
+    return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes + db->snapshot_bytes +
            fdb_disk_pinned_bytes(db->disk) + fdb_disk_compaction_bytes(db->disk);
 }
 

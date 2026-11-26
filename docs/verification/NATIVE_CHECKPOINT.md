@@ -836,3 +836,43 @@ CC=gcc cmake -S /repo -B /tmp/p37-done-tsan -DCMAKE_BUILD_TYPE=Debug \
 cmake --build /tmp/p37-done-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p37-done-tsan -L concurrency --repeat until-fail:5 --output-on-failure
 ```
+
+## First P3.8 snapshot checkpoint (V067)
+
+The shared-library integration test captures point-read snapshots in both
+memory modes. It checks binary keys and empty values across a subsequent
+atomic batch and checkpoint, then reopens to verify current data. In memory
+mode it checks capture at the exact memory boundary and refusal one byte
+below it, slot exhaustion, write backpressure, release accounting and 512
+atomic pair captures alongside a batch writer. LSM capture explicitly
+reports `FASTDB_UNSUPPORTED`. The wrapped-allocation test injects failure
+at the snapshot handle, each of two copied nodes, and the owned GET result.
+
+The commands ran in the V064 toolchain container with a read-only bind.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p38-first -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p38-first --parallel
+ctest --test-dir /tmp/p38-first -R '^fastdb_snapshot$' --output-on-failure
+ctest --test-dir /tmp/p38-first -R '^fastdb_alloc_failure$' --output-on-failure
+ctest --test-dir /tmp/p38-first --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p38-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p38-clang --parallel
+ctest --test-dir /tmp/p38-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p38-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p38-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p38-asan --output-on-failure
+```
+
+Both focused tests passed 1/1. Each full suite passed 24/24.
+`docker build -t fastdb-native:local .` passed its Release tests 24/24.
+With the V062 TSan setup, all four concurrency tests passed five repetitions
+each (20 executions).
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p38-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p38-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p38-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```

@@ -39,6 +39,7 @@ struct FastDB {
     uint64_t sequence;
     size_t iterator_bytes;
     size_t iterator_count;
+    size_t snapshot_bytes;
     FDBDisk *disk;
     size_t disk_budget;
     FDBBackgroundFlush *flush;

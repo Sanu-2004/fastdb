@@ -75,5 +75,23 @@ int main(void)
     fastdb_batch_destroy(batch);
     OK(fastdb_stats(db, &after));
     CHECK(after.revision == 3 && after.record_count == 2);
+    before = after;
+    FastDBSnapshot *snapshot;
+    for (size_t index = 0; index < 3; ++index) {
+        fail_after = index;
+        STATUS(fastdb_snapshot_create(db, &snapshot), FASTDB_OUT_OF_MEMORY);
+        CHECK(snapshot == NULL && fail_after == SIZE_MAX);
+        OK(fastdb_stats(db, &after));
+        CHECK(after.revision == before.revision && after.record_count == before.record_count);
+        CHECK(after.memory_bytes == before.memory_bytes);
+    }
+    OK(fastdb_snapshot_create(db, &snapshot));
+    out = db;
+    size = 1;
+    uint64_t revision = 1;
+    fail_after = 0;
+    STATUS(fastdb_snapshot_get(snapshot, "a", 1, &out, &size, &revision), FASTDB_OUT_OF_MEMORY);
+    CHECK(out == NULL && size == 0 && revision == 0);
+    fastdb_snapshot_release(snapshot);
     OK(fastdb_close(db));
 }

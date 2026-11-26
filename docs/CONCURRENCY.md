@@ -1,7 +1,7 @@
 # Concurrency and ownership
 
 The database mutex protects the memory trees, revision counter, catalog view,
-and iterator accounting. There is one engine lock per database. Commits
+and iterator and snapshot accounting. There is one engine lock per database. Commits
 linearize at the final revision publication inside that critical section.
 Persistent commits preallocate their replacement nodes and stage the
 complete WAL frame before exposing mutations. GET, exists and stats
@@ -31,10 +31,26 @@ open. An empty prefix matches all keys. `fastdb_iterator_next` returns
 that page opened. The last key can be used as an exclusive lower bound for
 the next range page. Independently opened pages see independent read views.
 
+In memory and persistent memory mode, `fastdb_snapshot_create` copies the
+ordered tree under the same mutex used for batch publication. The snapshot
+captures the committed revision and UTC read time in that critical section.
+A snapshot can therefore see a batch entirely before or entirely after its
+publication. Capture takes time proportional to the number of nodes and
+bytes copied. The initial limit is one snapshot per database, with the
+handle and tree charged to the database memory budget.
+
+`fastdb_snapshot_get` compares any stored expiration to the captured time
+and returns an owned copy and the record's original revision. A later
+write, delete or checkpoint can proceed while readers use the immutable
+copy. Callers may read one snapshot concurrently and must quiesce its
+readers before calling `fastdb_snapshot_release`. Release returns the memory
+charge under the database mutex. Snapshot capture currently returns
+`FASTDB_UNSUPPORTED` in LSM mode. The initial snapshot API supports point reads.
+
 The owner must prevent new operations and quiesce existing operations before
-calling close. A database with open iterators or an outstanding pinned read
-returns `FASTDB_BUSY` and stays open. Release the iterators or let the read
-finish, then retry. A close that reaches persistent
+calling close. A database with open iterators, a live snapshot or an
+outstanding pinned read returns `FASTDB_BUSY` and stays open. Release those
+handles or let the read finish, then retry. A close that reaches persistent
 cleanup consumes the handle even if sync or cleanup returns an error.
 GET copies are independent of that lifetime.
 

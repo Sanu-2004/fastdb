@@ -22,6 +22,7 @@ typedef struct FastDB FastDB;
 typedef struct FastDBOptions FastDBOptions;
 typedef struct FastDBBatch FastDBBatch;
 typedef struct FastDBIterator FastDBIterator;
+typedef struct FastDBSnapshot FastDBSnapshot;
 
 typedef enum FastDBStatus {
     FASTDB_OK = 0,
@@ -166,6 +167,18 @@ FASTDB_API FastDBStatus fastdb_batch_delete(FastDBBatch *batch, const void *key,
 FASTDB_API FastDBStatus fastdb_batch_expect(FastDBBatch *batch, const void *key,
                                            size_t key_size, uint64_t expected);
 FASTDB_API FastDBStatus fastdb_batch_commit(FastDB *db, const FastDBBatch *batch);
+
+/* One immutable snapshot per memory-mode database, charged to max_memory_bytes.
+ * Release it before closing the database. LSM capture returns FASTDB_UNSUPPORTED. */
+FASTDB_API FastDBStatus fastdb_snapshot_create(FastDB *db, FastDBSnapshot **out);
+/* The capture revision, or zero for a NULL snapshot. */
+FASTDB_API uint64_t fastdb_snapshot_revision(const FastDBSnapshot *snapshot);
+/* Returns a caller-owned value and the record's original revision. */
+FASTDB_API FastDBStatus fastdb_snapshot_get(const FastDBSnapshot *snapshot, const void *key,
+                                           size_t key_size, void **value, size_t *value_size,
+                                           uint64_t *revision);
+/* Quiesce readers of this snapshot before releasing it. */
+FASTDB_API void fastdb_snapshot_release(FastDBSnapshot *snapshot);
 
 /* A NULL/zero slice leaves a range bound open. The upper bound is exclusive. */
 FASTDB_API FastDBStatus fastdb_scan_range(FastDB *db, const FastDBRange *range,

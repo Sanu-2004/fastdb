@@ -226,3 +226,32 @@ void fdb_tree_destroy(FDBTree *tree)
     destroy(tree->root);
     *tree = (FDBTree){0};
 }
+
+static FastDBStatus clone_node(const FDBNode *source, FDBNode **out)
+{
+    if (source == NULL)
+        return FASTDB_OK;
+    FDBNode *node = fdb_node_create(&source->record, node_size(source));
+    if (node == NULL)
+        return FASTDB_OUT_OF_MEMORY;
+    *out = node;
+    node->red = source->red;
+    FastDBStatus status = clone_node(source->left, &node->left);
+    if (status == FASTDB_OK)
+        status = clone_node(source->right, &node->right);
+    return status;
+}
+
+FastDBStatus fdb_tree_clone(const FDBTree *source, FDBTree *out)
+{
+    *out = (FDBTree){0};
+    FastDBStatus status = clone_node(source->root, &out->root);
+    if (status != FASTDB_OK) {
+        fdb_tree_destroy(out);
+        return status;
+    }
+    out->count = source->count;
+    out->bytes = source->bytes;
+    out->key_bytes = source->key_bytes;
+    return FASTDB_OK;
+}
