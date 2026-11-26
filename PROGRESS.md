@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `2c68dd8` / `main`. V050–V053 verify P3.6; V054–V061 verify successive P3.7 slices.
+**Last verified base commit / branch:** `9402e0a` / `main`. V050–V053 verify P3.6; V054–V061 verify successive P3.7 slices.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -490,7 +490,7 @@ These are deliberate boundaries, not completed features:
 - In `fastdb-local-toolchain:bookworm`, GCC Debug `/tmp/p37mem-gcc` built successfully; focused `fastdb_background_flush` passed 1/1 and full CTest passed 23/23. Two initial compile attempts exposed test include/declaration issues and were corrected before final PASS. `git diff --check` passed.
 - This does not yet force actual `max_memory_bytes` saturation or establish RSS bounds. Clang, ASan/UBSan/LSan, Docker, and TSan were NOT RUN on this final source change; TSan remains blocked by B004. P3.7 remains IN_PROGRESS.
 - Next: derive a deterministic small-memory LSM configuration that reaches aggregate active+frozen admission limits under a gated worker; verify the rejected batch is invisible, `memory_bytes` never exceeds the configured maximum, and retry works once the frozen slot is released. Starting points: `tests/native/background_flush.c`, `src/core/engine.c`, `src/core/disk.c`, `docs/CONFIGURATION.md`.
-- Commit/push and final clean-tree checkpoint to be recorded after publishing this session.
+- Committed and pushed as `9402e0a` (`Verify active and frozen memory accounting`) to `origin/main`; post-push status was clean `main...origin/main`.
 
 ## 9. Current handoff
 
@@ -498,8 +498,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by testing actual aggregate active+frozen memory saturation, using V061 only as accounting evidence, not proof of saturation. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Derive minimal valid LSM limits and threshold from `fdb_disk_validate` in `src/core/disk.c`; gate worker I/O in `tests/native/background_flush.c`, fill active memory to rejection, assert exact budget and no partial commit, release/publish frozen tree, and retry. Then run all applicable compiler/sanitizer/Docker checks for the final code.
-- **Last verified good checkpoint:** P3.7 commit `2c68dd8` on `origin/main`; V060 passed focused backpressure (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker GCC Release (23/23 each). V061's GCC Debug focused/full checks passed 1/1 and 23/23 on top of that checkpoint. TSan remains blocked as B004.
-- **Working-tree state:** V061 source/doc evidence is currently uncommitted; update after push. Tests used disposable data directories; no owner data was opened.
+- **Last verified good checkpoint:** P3.7 commit `9402e0a` on `origin/main`; V060 passed focused backpressure (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker GCC Release (23/23 each). V061's GCC Debug focused/full checks passed 1/1 and 23/23. Post-push working tree was clean. TSan remains blocked as B004.
+- **Working-tree state:** Clean at pushed commit `9402e0a` on `origin/main`. Tests used disposable data directories; no owner data was opened.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.7 can proceed locally with normal builds and other sanitizers.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Close now has a regression proving it reports an unretried background compaction error. `max_open_files` reserves eight slots for compaction fan-in but is not a strict cap during every open/recovery path or process-wide across database instances. Disk headroom is advisory and checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Queue/memory/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
