@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `33fe653` / `main`. V050–V053 verify P3.6; V054–V056 verify successive P3.7 slices.
+**Last verified base commit / branch:** `f69cd49` / `main`. V050–V053 verify P3.6; V054–V057 verify successive P3.7 slices.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -450,7 +450,7 @@ These are deliberate boundaries, not completed features:
 - The focused GCC Debug command passed the `fastdb_background_flush` case 1/1. Full GCC Debug, Clang Release, and ASan/UBSan/LSan CTest each passed 23/23. Rebuilt the Docker image; its GCC 12.2 Release CTest passed 23/23. Commands and outcome are recorded in V057 and [native verification](docs/verification/NATIVE_CHECKPOINT.md). TSan remains blocked by B004.
 - No engine behavior change was needed; this verifies error propagation and recovery already implemented. P3.7 remains IN_PROGRESS.
 - Next action: audit `src/core/engine.c` admission/accounting (`fdb_memory_bytes`, `write_headroom`, `prepare_nodes`, `flush_worker`) against `docs/CONFIGURATION.md`; identify an untested queue or memory bound and add a deterministic limit/retry regression. Continue P3.7; do not start P3.8.
-- Commit/push and ending tree state to be recorded after publication.
+- Committed and pushed as `f69cd49` (`Verify background compaction close errors`) to `origin/main`.
 
 ## 9. Current handoff
 
@@ -458,8 +458,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by auditing and testing queue/memory accounting and background-work budgets. `src/core/engine.c` is the starting point for charged worker state, immutable-tree occupancy, `write_headroom`, and commit admission. Identify an untested saturation or retry condition and add deterministic coverage. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Review `fdb_memory_bytes`, `write_headroom`, `prepare_nodes`, and `flush_worker` alongside `docs/CONFIGURATION.md`; reproduce a concrete missing boundary in a native test, then run GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker Release CTest using [native verification](docs/verification/NATIVE_CHECKPOINT.md).
-- **Last verified good checkpoint:** P3.7 commit `a30609d` on `origin/main`; V057 passed focused background flush (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
-- **Working-tree state:** Implementation and documentation changes from this session await commit/push. No owner data was opened in tests.
+- **Last verified good checkpoint:** P3.7 commit `f69cd49` on `origin/main`; V057 passed focused background flush (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
+- **Working-tree state:** Clean at pushed commit `f69cd49` on `origin/main`. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.7 can proceed locally with normal builds and other sanitizers.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Close now has a regression proving it reports an unretried background compaction error. `max_open_files` currently budgets compaction fan-in only and does not strictly cap every database or process descriptor. Disk headroom is advisory and checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Queue/memory/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
