@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `2963f5c` / `main` at session start. V050–V053 verify P3.6; V054–V056 verify successive P3.7 slices.
+**Last verified base commit / branch:** `33fe653` / `main`. V050–V053 verify P3.6; V054–V056 verify successive P3.7 slices.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -439,7 +439,7 @@ These are deliberate boundaries, not completed features:
 - V056 passed GCC Debug, Clang Release and GCC ASan/UBSan/LSan complete CTest suites, 23/23 each, in `fastdb-local-toolchain:bookworm` with source mounted read-only. `docker build -t fastdb-native:local .` then built the final source and its embedded GCC 12.2 Release CTest passed 23/23. `git diff --check` passed. Docker emitted only the non-fatal warning that git.exe was unavailable for build metadata.
 - Initial fixture iteration failed because test disk settings were too small for the default workspace requirements; corrected the fixture to use valid minimal disk settings. Final focused test and all three full matrices passed.
 - TSan remains blocked by B004. P3.7 remains IN_PROGRESS: the descriptor cap limits compaction readers but does not impose a process-wide or strict handle-wide cap. Next inspect queue, memory and background-work budgeting/error paths; do not start P3.8 until all P3.7 requirements have evidence.
-- This checkpoint is pending commit/push; record its resulting commit and remote state here after publishing.
+- Committed and pushed as `33fe653` (`Bound compaction fan-in by descriptor budget`) to `origin/main`.
 
 ## 9. Current handoff
 
@@ -447,8 +447,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by reviewing and testing bounded queue, memory and background-work budgets plus failure/retry paths. The new `max_open_files` setting caps compaction fan-in after fixed descriptor reservations, but is not a process-wide descriptor cap. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Inspect existing queue, worker, memory accounting and config paths; select the first concrete unverified P3.7 requirement and add a deterministic regression before changing behavior. Run the GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker Release matrix using [native verification](docs/verification/NATIVE_CHECKPOINT.md).
-- **Last verified good checkpoint:** Start `2963f5c`; V056 on its working tree passed GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004. Commit/push details to be filled after publishing this slice.
-- **Working-tree state:** Implementation and documentation changes are pending commit/push. No owner data was opened in tests.
+- **Last verified good checkpoint:** P3.7 commit `33fe653` on `origin/main`; V056 passed GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
+- **Working-tree state:** Clean at pushed commit `33fe653` on `origin/main`. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.7 can proceed locally with normal builds and other sanitizers.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. `max_open_files` currently budgets compaction fan-in only and does not strictly cap every database or process descriptor. Disk headroom is advisory and checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Queue/memory/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
