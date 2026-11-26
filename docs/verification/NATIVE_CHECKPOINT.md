@@ -494,3 +494,23 @@ non-fatal warning that `git.exe` was unavailable for build metadata. The
 six-slot reservation is documented in `docs/CONFIGURATION.md`; the option
 limits compaction readers per database and is not a process-wide descriptor
 limit. TSan remains unavailable as recorded under blocker B004.
+
+## Background compaction error on close
+
+V057 added a deterministic fault-injection case to
+`tests/native/background_flush.c`. It creates two L0 tables, blocks the
+background merge at output write, injects EIO, then leaves the error
+unretried. `fastdb_close` must return `FASTDB_IO_ERROR`; a subsequent open
+must read values from the original L0 files. This validates the documented
+consuming-close/error-reporting behavior and recovery of authoritative
+inputs.
+
+The focused GCC Debug run of `fastdb_background_flush` passed 1/1. The full
+GCC 12.2 Debug, Clang 14 Release, and GCC ASan/UBSan/LSan suites passed 23/23
+each in the read-only `fastdb-local-toolchain:bookworm` container. The same
+working tree built with `docker build -t fastdb-native:local .`; the
+Dockerfile's GCC 12.2 Release CTest passed 23/23. Build paths inside the
+Linux container were `/tmp/p37-close-error`, `/tmp/p37c-gcc`,
+`/tmp/p37c-clang`, and `/tmp/p37c-asan`. No engine code change was needed;
+this adds evidence for the existing error and recovery contract. TSan was
+not rerun because B004 remains open.

@@ -441,6 +441,58 @@ static void failed_background_compaction_keeps_l0_flush(void)
     remove_disk_fixture(path);
 }
 
+static void close_reports_unretried_compaction_error(void)
+{
+    char path[] = "/tmp/fastdb-bg-compact-close-error.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = background_options(path);
+    options->limits.max_memory_bytes = 64 * 1024 * 1024;
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    policy.level0_file_trigger = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
+    Gate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
+                 .foreground = pthread_self(), .operation = FDB_FS_WRITE, .error = EIO};
+    const FDBFs fs = {enter_gate, &gate};
+    FastDB *db;
+    OK(fdb_open_with_fs(options, &fs, &db));
+    gate.database = db;
+
+    const char *first[] = {"a", "b", "c"};
+    for (size_t i = 0; i < 3; ++i)
+        OK(fastdb_put(db, first[i], 1, old_bytes.data, old_bytes.size));
+    wait_worker_maintenance(db, 3);
+
+    CHECK(pthread_mutex_lock(&gate.mutex) == 0);
+    gate.remaining = 1;
+    gate.compaction_only = true;
+    CHECK(pthread_mutex_unlock(&gate.mutex) == 0);
+    const char *second[] = {"d", "e", "f"};
+    for (size_t i = 0; i < 3; ++i)
+        OK(fastdb_put(db, second[i], 1, new_bytes.data, new_bytes.size));
+    wait_for_gate(&gate);
+    CHECK(gate.engine_mutex_available);
+    release_gate(&gate);
+
+    CHECK(pthread_mutex_lock(&db->mutex) == 0);
+    while (db->flush->compaction_running || db->flush->compaction_error == FASTDB_OK)
+        CHECK(pthread_cond_wait(&db->flush->condition, &db->mutex) == 0);
+    CHECK(db->flush->error == FASTDB_OK);
+    CHECK(db->flush->compaction_error == FASTDB_IO_ERROR);
+    CHECK(pthread_mutex_unlock(&db->mutex) == 0);
+
+    STATUS(fastdb_close(db), FASTDB_IO_ERROR);
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, old_bytes, 1);
+    expect_value(db, (FastDBSlice){"f", 1}, new_bytes, 6);
+    OK(fastdb_close(db));
+    CHECK(pthread_cond_destroy(&gate.condition) == 0);
+    CHECK(pthread_mutex_destroy(&gate.mutex) == 0);
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     concurrent_build(0);
@@ -450,5 +502,6 @@ int main(void)
     worker_schedules_compaction_after_flush();
     close_drains_background_compaction();
     failed_background_compaction_keeps_l0_flush();
+    close_reports_unretried_compaction_error();
     crash_during_build();
 }
