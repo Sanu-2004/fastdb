@@ -672,3 +672,66 @@ docker run --rm --network none --security-opt seccomp=unconfined \
 Build passed; all three suites completed 20 repetitions (60/60 suite runs)
 with no TSan diagnostics. This is repeatability evidence for the same host and
 runtime setup, not cross-platform race-safety proof.
+
+## Live memory saturation and compaction fan-in (V064)
+
+`aggregate_memory_limit` gates the worker with three frozen records and sets
+the memory limit to the empty handle's accounted bytes plus four nodes and
+one WAL frame. The first active write fits that boundary. A second write and
+a two-operation batch return `FASTDB_LIMIT_EXCEEDED` while the active tree is
+below its flush threshold. The revision, record count, charged bytes and
+visibility stay unchanged on refusal. Publication releases three nodes, the
+same batch succeeds, and reopen verifies the committed keys and revisions.
+
+`workspace_limits_fan_in` opens one L0 table overlapping two L1 tables with
+`max_working_bytes` one byte below the budget for three inputs and their
+selection arrays. The original planner chose three inputs and
+`fastdb_compact` returned `FASTDB_LIMIT_EXCEEDED` in
+`/tmp/p37-plan-repro`. Charging the index and file ID per input before
+planning lets the two-input stages publish and reopen with the new value
+and the tombstone intact.
+
+The Linux commands below ran inside `fastdb-local-toolchain:bookworm` with
+`--network none` and the D: workspace bind mounted read-only at `/repo`.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-plan-repro -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-plan-repro --target fastdb_compaction --parallel
+ctest --test-dir /tmp/p37-plan-repro -R '^fastdb_compaction$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-plan-fixed -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-plan-fixed --parallel
+ctest --test-dir /tmp/p37-plan-fixed -R '^fastdb_compaction$' --output-on-failure
+ctest --test-dir /tmp/p37-plan-fixed -R '^fastdb_background_flush$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-final-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-final-gcc --parallel
+ctest --test-dir /tmp/p37-final-gcc --output-on-failure
+
+CC=clang cmake -S /repo -B /tmp/p37-final-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p37-final-clang --parallel
+ctest --test-dir /tmp/p37-final-clang --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-final-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-final-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37-final-asan --output-on-failure
+```
+
+The two focused tests passed 1/1 each after the fix. GCC Debug, Clang Release,
+and GCC ASan/UBSan with leak detection each passed 23/23. The first combined
+focused regex was rejected by the container shell after Windows argument
+quoting. The two separate CTest invocations above passed.
+
+Using the disposable container and V062's `--security-opt seccomp=unconfined`
+setting, GCC TSan also passed the concurrency label 3/3:
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-final-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-final-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p37-final-tsan -L concurrency --output-on-failure
+```
+
+`docker build -t fastdb-native:local .` succeeded with GCC Release CTest
+23/23. Docker warned that `git.exe` was unavailable for build metadata.

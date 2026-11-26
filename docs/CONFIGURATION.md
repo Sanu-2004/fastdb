@@ -89,7 +89,11 @@ metadata and one reader workspace against unused memory headroom. Other
 point reads can use the serial workspace.
 
 While the one frozen slot is occupied, writes into a new active tree can
-continue within the memory and metadata budgets. Writes return `FASTDB_BUSY`
+continue within the memory and metadata budgets. The memory budget includes
+both trees and the temporary allocations needed for the write, including its
+WAL frame. Insufficient headroom returns `FASTDB_LIMIT_EXCEEDED` before
+appending the frame. A write can fit after the frozen tree is published and
+released. Writes return `FASTDB_BUSY`
 when that tree reaches the threshold before the worker frees the slot. The
 same backpressure applies if a pinned reader delays file reclamation. The
 combined key metadata must also fit one replay tree, since recovery can see
@@ -116,7 +120,8 @@ existing levels. An out-of-range file level fails catalog validation.
 
 Compaction can use the reserved table workspace plus available headroom
 after accounting for the active tree, copied pages and reserved catalog
-space. Each input adds a reader with one block, metadata and heap slots.
+space. Each input adds a reader with one block, metadata, merge bookkeeping,
+and room for its catalog index and file ID.
 The job also holds one writer. The effective fan-in can decrease with
 available memory. Insufficient capacity for a selected job returns
 `FASTDB_LIMIT_EXCEEDED`. The output count and hard metadata limits still

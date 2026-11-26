@@ -1,6 +1,7 @@
 #include "disk_fixture.h"
 #include "engine.h"
 #include "manifest.h"
+#include "wal.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -321,6 +322,73 @@ static void wait_worker_maintenance(FastDB *db, uint64_t sequence)
     CHECK(pthread_mutex_unlock(&db->mutex) == 0);
 }
 
+static void aggregate_memory_limit(void)
+{
+    char path[] = "/tmp/fastdb-bg-memory.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = background_options(path);
+    FastDB *db;
+    FastDBStats empty, before, after;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_stats(db, &empty));
+    OK(fastdb_close(db));
+
+    size_t node_bytes;
+    CHECK(fdb_node_size((FastDBSlice){"x", 1}, new_bytes, &node_bytes));
+    size_t frame_bytes = FDB_WAL_FRAME_BYTES + FDB_RECORD_HEADER_BYTES + 1 + new_bytes.size;
+    FastDBLimits limits = options->limits;
+    /* Three frozen nodes plus one active node and its WAL frame fit exactly. */
+    limits.max_memory_bytes = empty.memory_bytes + 4 * node_bytes + frame_bytes;
+    OK(fastdb_options_set_limits(options, &limits));
+    Gate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
+                 .foreground = pthread_self(), .operation = FDB_FS_WRITE, .remaining = 5};
+    const FDBFs fs = {enter_gate, &gate};
+    OK(fdb_open_with_fs(options, &fs, &db));
+    install_frozen(db);
+    wait_for_gate(&gate);
+
+    OK(fastdb_put(db, "x", 1, new_bytes.data, new_bytes.size));
+    OK(fastdb_stats(db, &before));
+    CHECK(before.revision == 4 && before.record_count == 4);
+    CHECK(before.memory_bytes == limits.max_memory_bytes - frame_bytes);
+    STATUS(fastdb_put(db, "y", 1, new_bytes.data, new_bytes.size), FASTDB_LIMIT_EXCEEDED);
+
+    FastDBBatch *batch;
+    OK(fastdb_batch_create(options, &batch));
+    OK(fastdb_batch_put(batch, "b", 1, NULL, 0));
+    OK(fastdb_batch_put(batch, "c", 1, NULL, 0));
+    STATUS(fastdb_batch_commit(db, batch), FASTDB_LIMIT_EXCEEDED);
+    expect_missing(db, (FastDBSlice){"y", 1});
+    expect_missing(db, (FastDBSlice){"b", 1});
+    expect_missing(db, (FastDBSlice){"c", 1});
+    OK(fastdb_stats(db, &after));
+    CHECK(after.revision == before.revision && after.record_count == before.record_count);
+    CHECK(after.memory_bytes == before.memory_bytes);
+
+    release_gate(&gate);
+    wait_worker_maintenance(db, 3);
+    OK(fastdb_stats(db, &after));
+    CHECK(after.revision == 4 && after.record_count == 1);
+    CHECK(after.memory_bytes == empty.memory_bytes + node_bytes);
+    OK(fastdb_batch_commit(db, batch));
+    fastdb_batch_destroy(batch);
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){0}, 5);
+    expect_value(db, (FastDBSlice){"c", 1}, (FastDBSlice){0}, 6);
+    OK(fastdb_close(db));
+    CHECK(pthread_cond_destroy(&gate.condition) == 0);
+    CHECK(pthread_mutex_destroy(&gate.mutex) == 0);
+
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"k", 1}, old_bytes, 1);
+    expect_value(db, (FastDBSlice){"x", 1}, new_bytes, 4);
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){0}, 5);
+    expect_value(db, (FastDBSlice){"c", 1}, (FastDBSlice){0}, 6);
+    expect_missing(db, (FastDBSlice){"y", 1});
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 static size_t tables_at_level(const char *path, uint32_t level)
 {
     FDBDirectory directory;
@@ -552,6 +620,7 @@ static void close_reports_unretried_compaction_error(void)
 
 int main(void)
 {
+    aggregate_memory_limit();
     concurrent_build(0);
     concurrent_build(ENOSPC);
     failed_rotation_keeps_active();

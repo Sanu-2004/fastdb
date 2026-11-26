@@ -569,14 +569,15 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
     size_t cap = disk->compaction.max_working_bytes;
     if (cap != 0 && cap < available)
         available = cap;
-    /* Charge one metadata and cursor bound per input, plus all reader/heap pointers. */
-    size_t input_bytes;
+    /* Each selected input needs a reader, merge bookkeeping, a catalog index and a file ID. */
+    size_t input_bytes, planning_input_bytes;
     if (!fdb_add_size(disk->reader_bytes,
                      sizeof(FDBSSTReader *) + 2 * sizeof(FDBSSTIterator *) + sizeof(size_t),
-                     &input_bytes))
+                     &input_bytes) ||
+        !fdb_add_size(input_bytes, sizeof(size_t) + sizeof(uint64_t), &planning_input_bytes))
         return FASTDB_LIMIT_EXCEEDED;
     size_t affordable = available > disk->writer_bytes ?
-                        (available - disk->writer_bytes) / input_bytes : 0;
+                        (available - disk->writer_bytes) / planning_input_bytes : 0;
     FDBCompactionPolicy policy = disk->policy;
     size_t descriptor_fan_in = fdb_disk_compaction_fan_in(disk->max_open_files,
                                                           policy.max_inputs);

@@ -1,5 +1,7 @@
 #include "disk_fixture.h"
+#include "engine.h"
 #include "manifest.h"
+#include "sstable_format.h"
 
 static uint64_t check_levels(const char *path, const size_t *counts, uint32_t levels)
 {
@@ -75,6 +77,59 @@ static void staged_and_reopen(void)
     OK(fastdb_flush(db));
     OK(fastdb_compact(db));
     expect_value(db, (FastDBSlice){"d", 1}, (FastDBSlice){0}, 10);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void workspace_limits_fan_in(void)
+{
+    char path[] = "/tmp/fastdb-compaction-fan-in.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions compaction;
+    fastdb_compaction_options_default(&compaction);
+    compaction.max_levels = 2;
+    compaction.max_merge_inputs = 3;
+    OK(fastdb_options_set_compaction(options, &compaction));
+
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    OK(fastdb_put(db, "c", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    OK(fastdb_put(db, "a", 1, "new", 3));
+    OK(fastdb_delete(db, "c", 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){1, 2}, 2);
+
+    size_t block = FDB_RECORD_HEADER_BYTES + options->limits.max_key_bytes +
+                   options->limits.max_value_bytes + SST_BLOCK_HEADER_BYTES + SST_OFFSET_BYTES;
+    FDBSSTLimits table = {
+        options->limits.max_key_bytes, options->limits.max_value_bytes,
+        options->storage.target_block_bytes, block, options->storage.max_index_bytes,
+        options->storage.max_filter_bytes, options->storage.bloom_bits_per_key,
+    };
+    size_t reader, writer;
+    CHECK(fdb_sst_reader_budget(&table, &reader));
+    CHECK(fdb_sst_writer_budget(&table, &writer));
+    size_t input = reader + sizeof(FDBSSTReader *) + 2 * sizeof(FDBSSTIterator *) +
+                   2 * sizeof(size_t) + sizeof(uint64_t);
+    /* One byte below three inputs with selection arrays. Two inputs still fit. */
+    compaction.max_working_bytes = writer + 3 * input - 1;
+    OK(fastdb_options_set_compaction(options, &compaction));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_compact(db));
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 2}, 2);
+
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"new", 3}, 3);
+    expect_missing(db, (FastDBSlice){"c", 1});
     OK(fastdb_close(db));
     fastdb_options_destroy(options);
     remove_disk_fixture(path);
@@ -192,6 +247,7 @@ static void reserve_split_outputs_in_one_edit(void)
 
 int main(void)
 {
+    workspace_limits_fan_in();
     staged_and_reopen();
     auto_cascade_and_disable();
     workspace_limit();
