@@ -439,3 +439,39 @@ command above passed. Clang, ASan/UBSan/LSan, TSan, and headroom arithmetic
 boundary tests were not run for V054. The query is advisory and does not
 reserve blocks or account for all quotas/metadata or concurrent outside
 writers.
+
+## Headroom boundary and compaction admission
+
+V055 ran the GCC Debug, Clang Release, and GCC ASan/UBSan/LSan matrix in the
+local `fastdb-local-toolchain:bookworm` container, with the repository mounted
+read-only at `/repo`; each build and complete CTest passed 23/23. The same
+working tree was built into `fastdb-native:local`; its GCC 12.2 Release CTest
+also passed 23/23.
+
+The expanded `fastdb_lsm_fault` case verifies that low-space compaction
+returns `FASTDB_LIMIT_EXCEEDED` while keeping the published SSTable file count
+unchanged, and that compaction succeeds after the injected available space is
+restored. It also configures `min_free_bytes=UINT64_MAX` and confirms a write
+is rejected without advancing the sequence. The test was first placed before
+the initial SSTable flush, where the engine correctly had no compaction work;
+the assertion was moved after flush. Source review also found an uninitialized
+reservation local when `fdb_wal_frame_size` returned an error; it is now
+initialized only from a successful result.
+
+Exact matrix commands (all build directories were inside the disposable
+container):
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-gcc --parallel
+ctest --test-dir /tmp/p37-gcc --output-on-failure
+
+CC=clang cmake -S /repo -B /tmp/p37-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p37-clang --parallel
+ctest --test-dir /tmp/p37-clang --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37-asan --output-on-failure
+```

@@ -2,6 +2,22 @@
 #include "engine.h"
 
 #include <errno.h>
+#include <dirent.h>
+#include <string.h>
+
+static size_t table_file_count(const char *path)
+{
+    DIR *directory = opendir(path);
+    CHECK(directory != NULL);
+    size_t count = 0;
+    const struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strncmp(entry->d_name, "sst-", 4) == 0)
+            ++count;
+    }
+    CHECK(closedir(directory) == 0);
+    return count;
+}
 
 typedef struct Injection {
     FDBFsOp op;
@@ -65,7 +81,25 @@ static void low_space_admission(void)
     expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"value", 5}, 1);
     injection.available_bytes = UINT64_MAX;
     OK(fastdb_flush(db));
+    CHECK(table_file_count(path) == 1);
+    injection.available_bytes = 1024;
+    STATUS(fastdb_compact(db), FASTDB_LIMIT_EXCEEDED);
+    CHECK(table_file_count(path) == 1);
     expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"value", 5}, 1);
+    injection.available_bytes = UINT64_MAX;
+    OK(fastdb_compact(db));
+    CHECK(table_file_count(path) == 1);
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"value", 5}, 1);
+    OK(fastdb_close(db));
+
+    settings.min_free_bytes = UINT64_MAX;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings));
+    injection.available_bytes = UINT64_MAX;
+    OK(fdb_open_with_fs(options, &fs, &db));
+    STATUS(fastdb_put(db, "b", 1, "overflow", 8), FASTDB_LIMIT_EXCEEDED);
+    OK(fastdb_stats(db, &stats));
+    CHECK(stats.revision == 1);
+    expect_missing(db, (FastDBSlice){"b", 1});
     OK(fastdb_close(db));
     fastdb_options_destroy(options);
     remove_disk_fixture(path);

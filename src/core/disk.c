@@ -319,7 +319,7 @@ FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t cou
 {
     size_t frame_bytes;
     FastDBStatus status = fdb_wal_frame_size(&disk->log.wal, records, count, &frame_bytes);
-    uint64_t reservation = frame_bytes;
+    uint64_t reservation = status == FASTDB_OK ? frame_bytes : 0;
     if (status == FASTDB_OK &&
         frame_bytes > disk->wal.max_segment_bytes - disk->log.wal.offset) {
         uint64_t overhead = FDB_WAL_HEADER_BYTES + disk->manifest.max_bytes;
