@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `61736b0` / `main`. V041 verifies the first P3.6 increment. The archived `ca5a528` baseline is V001–V002.
+**Last verified base commit / branch:** `d8e16dd` / `main`. V044–V045 verify the manual merge increment. The archived `ca5a528` baseline is V001–V002.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
-**Next task:** P3.6 — detach compaction streaming from the mutex and revalidate inputs at publication.
+**Next task:** P3.6 — schedule detached compaction on a worker and coordinate shutdown.
 
 ## 1. How to use this file
 
@@ -99,7 +99,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P3.3 | Leveled scheduler, overlap closure, L0 and L1+ invariants, byte thresholds, cascading and bottommost behavior. | DONE | V026–V028. Serial threshold selection, cascading, closed range checks, two-input overlap staging and terminal level behavior. [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
 | P3.4 | Manual range/full compaction and disabled mode; atomic manifest publication and safe reclamation. | DONE | V026–V028. Native and CLI maintenance, active WAL continuity, bounded admission, old input retention on failure, reopen, and nine compaction process-kill cases. Full maintenance promotes eligible tables to the last level and retains all history. |
 | P3.5 | Coherent read-view capture, pinned versions/files, active-to-immutable rotation and background flush worker(s). | DONE | V031, V036–V037. Optional single flush worker, bounded pinned GET/exists, coherent frozen and active reads, deferred reclamation, worker resumption, and shutdown. [ADR 0006](docs/adr/0006-pinned-sstable-reads.md). |
-| P3.6 | Compaction worker(s), conflict reservations, commit revalidation, scheduling, safe failure/cancel/shutdown. | IN_PROGRESS | V041 verifies reserving the entire bounded output ID range in one durable edit before the merge. The worker, stale-plan rejection, cancellation and shutdown remain open. |
+| P3.6 | Compaction worker(s), conflict reservations, commit revalidation, scheduling, safe failure/cancel/shutdown. | IN_PROGRESS | V041 verifies durable ID reservation. V045 verifies detached manual merge with WAL rotation, input-ID revalidation, maintenance exclusion, and reopen. Worker scheduling, concurrent L0 publication, cancellation and worker shutdown remain open. |
 | P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | TODO | — |
 | P3.8 | Native snapshots and history retention across memtable and disk; atomic batch visibility; coherent merged scans. | TODO | — |
 | P3.9 | TTL with controlled clock, expiration masking, physical reclamation and explicitly enabled memory eviction policies. | TODO | — |
@@ -266,6 +266,8 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V041 | 2026-11-26 / P3.6 compaction ID reservation | GCC Debug, Clang Release and GCC ASan/UBSan/LSan in `/tmp/fastdb-reserve-$profile`; see native verification. | PASS | 23/23 per profile. Checks error before reservation rename, uncertain directory sync, no reuse, ID overflow and three compaction outputs committed with only two manifest edits. |
 | V042 | 2026-11-26 / P3.6 native Docker image | `docker build --progress=plain -t fastdb-native:local .` and a two-container LSM compaction/reopen check. | PASS | 23/23 Release tests, then `VALUE 2 6e6577` on a fresh container. Image ID `sha256:3a6740f8a31ac07f682e9d689cd92e0bf9b4786bc54b0b8a21c750623e60b614`, Linux amd64, UID/GID 10001. |
 | V043 | 2026-11-26 / final native sources with P3.6 reservation | Clang `--analyze` with the V022 command over `src/core/*.c`, `src/storage/*.c` and `cli/*.c`. | PASS | Exit 0, no diagnostics. |
+| V044 | 2026-11-26 / starting `d8e16dd` checkpoint | GCC default configuration, parallel CMake build, and CTest with `--output-on-failure` in `/tmp/resume` inside the read-only Debian toolchain Docker fixture. | PASS | 23/23. |
+| V045 | 2026-11-26 / detached manual compaction merge | GCC Debug, Clang Release and GCC ASan/UBSan/LSan CMake/CTest matrix in `/tmp/p36-$p`; see native verification. | PASS | 23/23 per profile. The gated test rotates the WAL during a stalled merge, verifies reads and maintenance exclusion, then reopens to verify foreground data, a tombstone, and a write after publication. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -380,15 +382,19 @@ These are deliberate boundaries, not completed features:
 - Committed and pushed the worker as `fd45626`. Completed P3.5 by charging a bounded pinned point read and deferring reclamation through publication. V037–V038 verify old-value and tombstone reads crossing compaction, retained name lifetimes, and a flush worker that resumes when the pin releases. V039 records the local TSan startup failure. V040 rebuilt the Docker image and verified both persistent-volume restart paths.
 - Pushed P3.5 as `61736b0` and started P3.6. The serial executor now takes output IDs from one durable reservation. V041–V043 verify the final native tests, Docker rebuild and compaction/reopen smoke, and static analysis.
 
+### Session 005 — 2026-11-26 — Detached manual compaction merge
+
+- Reverified `d8e16dd` (V044). Opened compaction inputs under the database mutex and charged independent workspace before unlocking the manual streaming merge. Other maintenance remains excluded during that merge. After reacquiring the mutex, publication checks input IDs and level bounds and incorporates the live WAL entries and allocator high-water mark. V045 verifies the new interleaving and the existing recovery paths.
+
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
 - **Next task ID:** P3.6.
-- **Next action:** In `src/storage/compaction.c`, move the existing output ID reservation into an explicit job that owns its selected inputs and split boundary. Separate unlocked merge output from locked publication. At commit, compare selected input IDs and destination closure with the latest catalog, preserving newer WALs and unselected L0 files. Pin job inputs and protect reserved outputs from orphan cleanup while the worker is active. Start with one compaction job per database. Test a job paused during merge while newer WALs and L0 files are published, then test stale-plan rejection, cancellation, close and reopen.
+- **Next action:** Schedule one background compaction at a time using the detached path in `src/core/disk.c` and `src/storage/compaction.c`. Add queued/cancelled/running state and a close signal with a join. Keep the existing exclusion of other SSTable maintenance for the first worker increment. Then allow concurrent L0 publication by identifying inputs by ID, protecting reserved temporary outputs during orphan scans, and revalidating destination closure before publication. Add gated tests for worker shutdown and a concurrent L0 flush. The manual WAL-rotation interleaving is covered in `tests/native/read_view.c`.
 - **Next commands:** Run `make test`, `make test-recovery` and `make test-concurrency` with disposable directories after the first compaction executor change. Use `tests/native/compaction.c`, `public_crash.c` and `read_view.c` as regression entry points. See [native verification](docs/verification/NATIVE_CHECKPOINT.md) for compiler and sanitizer commands.
-- **Last verified good checkpoint:** All three native storage modes, automatic flush when configured, pinned SSTable point reads and serial leveled compaction with one output ID reservation per job. V041–V042 passed 23/23 across GCC, Clang, ASan/UBSan/LSan and Docker Release. Docker restart smoke passed with both persistent modes in V040 and with compacted LSM data in V042.
-- **Working-tree state:** `61736b0` on `origin/main` completes P3.5. The following P3.6 increment changes `src/storage/compaction.c`, `src/storage/manifest.*`, native tests and documentation. No owner data was opened in tests.
+- **Last verified good checkpoint:** V045 passed 23/23 across GCC, Clang and ASan/UBSan/LSan. The preceding Docker image and restart evidence remains V040 and V042.
+- **Working-tree state:** Started at `d8e16dd` on `origin/main`. The manual merge increment changes core/storage, the native concurrency fixture and documentation. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.6 can proceed locally with normal builds and other sanitizers.
-- **Critical limits:** The worker's SSTable build and one bounded point read can run outside the mutex. Catalog publication and compaction still take the mutex. Size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
+- **Critical limits:** Manual compaction can stream outside the mutex when there is independent workspace. It excludes other SSTable maintenance during the merge. Automatic compaction and low-headroom manual compaction remain serialized. Size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

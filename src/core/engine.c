@@ -213,7 +213,7 @@ static FastDBStatus flush_immutable(FastDB *db)
         status = fdb_disk_flush_commit(db->disk, &flush->frozen, &output);
     fdb_flush_dispose(&output);
     if (status == FASTDB_OK)
-        status = fdb_disk_compact(db->disk, false, NULL, write_headroom(db));
+        status = fdb_disk_compact(db, false, NULL);
     return status;
 }
 
@@ -300,7 +300,8 @@ FastDBStatus fastdb_close(FastDB *db)
     if (db == NULL)
         return FASTDB_INVALID_ARGUMENT;
     pthread_mutex_lock(&db->mutex);
-    if (db->iterator_count != 0 || fdb_disk_pinned_bytes(db->disk) != 0) {
+    if (db->iterator_count != 0 || fdb_disk_pinned_bytes(db->disk) != 0 ||
+        fdb_disk_compaction_bytes(db->disk) != 0) {
         pthread_mutex_unlock(&db->mutex);
         return FASTDB_BUSY;
     }
@@ -332,7 +333,7 @@ size_t fdb_memory_bytes(const FastDB *db)
 {
     size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
     return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes +
-           fdb_disk_pinned_bytes(db->disk);
+           fdb_disk_pinned_bytes(db->disk) + fdb_disk_compaction_bytes(db->disk);
 }
 
 FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out)
@@ -368,7 +369,7 @@ FastDBStatus fastdb_flush(FastDB *db)
     if (status == FASTDB_OK)
         status = fdb_disk_flush(db->disk, &db->tree);
     if (status == FASTDB_OK)
-        status = fdb_disk_compact(db->disk, false, NULL, write_headroom(db));
+        status = fdb_disk_compact(db, false, NULL);
     if (flush != NULL) {
         if (status != FASTDB_BUSY)
             flush->error = status;
@@ -391,7 +392,9 @@ FastDBStatus fastdb_compact_range(FastDB *db, const FastDBRange *range)
     else if (db->flush != NULL && db->flush->frozen.count != 0 && db->flush->error == FASTDB_OK)
         status = FASTDB_BUSY;
     else
-        status = fdb_disk_compact(db->disk, true, range, write_headroom(db));
+        status = fdb_disk_compact(db, true, range);
+    if (db->flush != NULL)
+        pthread_cond_broadcast(&db->flush->condition);
     pthread_mutex_unlock(&db->mutex);
     return status;
 }

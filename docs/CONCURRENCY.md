@@ -62,7 +62,14 @@ from the immutable tree. Writes may rotate later WAL segments during this
 interval. The worker reselects its WAL boundary in the current catalog and
 inserts the output by file ID. The frozen tree stays visible through durable
 publication. Manual compaction returns `FASTDB_BUSY` while a frozen table is
-actively being flushed. Leveled compaction itself still holds the mutex.
+actively being flushed. When sufficient memory is available, manual
+compaction opens its inputs under the mutex, copies any split key, and
+releases the mutex during the streaming merge. Reads and writes can proceed.
+Other flushes and compactions wait or return `FASTDB_BUSY`, and close returns
+`FASTDB_BUSY` while the merge is in flight. After reacquiring the mutex,
+compaction validates input IDs, retains the live WAL entries, and publishes
+the replacement catalog. Automatic compaction and manual compaction with
+insufficient independent workspace use the existing serialized path.
 
 `fastdb_flush` waits for a running flush, retries frozen work after a known
 failure and then flushes the active tree synchronously. Close signals the

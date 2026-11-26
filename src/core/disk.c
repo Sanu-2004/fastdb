@@ -8,6 +8,7 @@
 #include <string.h>
 
 struct FDBDisk {
+    size_t compaction_bytes;
     FDBDirectory dir;
     FDBWalSet log;
     FDBSSTLimits table;
@@ -350,7 +351,13 @@ size_t fdb_disk_pinned_bytes(const FDBDisk *disk)
 
 bool fdb_disk_maintenance_waiting(const FDBDisk *disk)
 {
-    return disk->log.reclaim_pending && disk->log.pinned_read_bytes != 0;
+    return disk->compaction_bytes != 0 ||
+           (disk->log.reclaim_pending && disk->log.pinned_read_bytes != 0);
+}
+
+size_t fdb_disk_compaction_bytes(const FDBDisk *disk)
+{
+    return disk == NULL ? 0 : disk->compaction_bytes;
 }
 
 FastDBStatus fdb_disk_pin_read(FDBDisk *disk, FastDBSlice key, uint64_t sequence,
@@ -409,6 +416,8 @@ FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
 {
     if (!fdb_disk_has_tables(disk))
         return FASTDB_UNSUPPORTED;
+    if (disk->compaction_bytes != 0)
+        return FASTDB_BUSY;
     FastDBStatus status = fdb_storage_prepare_maintenance(&disk->log);
     if (status == FASTDB_OK)
         status = fdb_flush_l0(&disk->log, tree, disk->log.wal.sequence, &disk->table);
@@ -417,6 +426,8 @@ FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
 
 FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequence)
 {
+    if (disk->compaction_bytes != 0)
+        return FASTDB_BUSY;
     FastDBStatus ready = fdb_storage_prepare_maintenance(&disk->log);
     if (ready != FASTDB_OK)
         return ready;
@@ -450,12 +461,15 @@ FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushO
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
-FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *range, size_t headroom)
+FastDBStatus fdb_disk_compact(FastDB *db, bool manual, const FastDBRange *range)
 {
+    FDBDisk *disk = db->disk;
     if (!fdb_disk_has_tables(disk) || !disk->compaction.enabled)
         return manual ? FASTDB_UNSUPPORTED : FASTDB_OK;
     if (disk->log.poisoned)
         return FASTDB_COMMIT_UNCERTAIN;
+    if (disk->compaction_bytes != 0)
+        return FASTDB_BUSY;
     FastDBStatus ready = fdb_storage_prepare_maintenance(&disk->log);
     if (ready != FASTDB_OK)
         return ready == FASTDB_BUSY && !manual ? FASTDB_OK : ready;
@@ -466,6 +480,7 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
         disk->compaction_cleanup_needed = false;
     }
 
+    size_t headroom = db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
     size_t available = disk->table_workspace + headroom;
     size_t cap = disk->compaction.max_working_bytes;
     if (cap != 0 && cap < available)
@@ -490,11 +505,10 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
     size_t *inputs = policy.max_inputs == 2 ? inline_inputs : malloc(input_indexes);
     if (inputs == NULL)
         return FASTDB_OUT_OF_MEMORY;
-    const FDBMergeLimits limits = {
+    FDBMergeLimits limits = {
         .output_table = disk->table,
         .max_inputs = policy.max_inputs,
         .max_outputs = disk->manifest.max_files,
-        .max_working_bytes = input_indexes <= available ? available - input_indexes : 0,
         .target_output_bytes = disk->compaction.target_file_bytes,
     };
     FastDBStatus status;
@@ -506,11 +520,27 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
         status = fdb_storage_prepare_maintenance(&disk->log);
         if (status != FASTDB_OK)
             break;
-        if (plan.count > affordable) {
+        headroom = db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
+        available = headroom + disk->table_workspace;
+        if (cap != 0 && cap < available)
+            available = cap;
+        if (input_indexes > available || disk->writer_bytes > available - input_indexes ||
+            plan.count > (available - input_indexes - disk->writer_bytes) / input_bytes) {
             status = FASTDB_LIMIT_EXCEEDED;
             break;
         }
-        status = fdb_compact_once(&disk->log, &policy, &plan, inputs, &limits);
+        limits.max_working_bytes = available - input_indexes;
+        size_t catalogs, charge = disk->writer_bytes + plan.count * input_bytes;
+        pthread_mutex_t *mutex = NULL;
+        if (manual && catalog_budget(&disk->manifest, &catalogs) &&
+            fdb_add_size(charge, catalogs / 3, &charge) &&
+            fdb_add_size(charge, input_indexes, &charge) &&
+            fdb_add_size(charge, plan.split_after.size, &charge) && charge <= headroom) {
+            disk->compaction_bytes = charge;
+            mutex = &db->mutex;
+        }
+        status = fdb_compact_once(&disk->log, &policy, &plan, inputs, &limits, mutex);
+        disk->compaction_bytes = 0;
         if (status != FASTDB_OK) {
             disk->compaction_cleanup_needed = true;
             break;

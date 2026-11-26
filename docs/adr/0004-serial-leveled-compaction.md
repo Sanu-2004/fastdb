@@ -2,10 +2,16 @@
 
 Status: Accepted
 
-The first executor runs with the database mutex held. This keeps the
-catalog stable during selection and file creation and makes reclamation
-safe as soon as the replacement is durable. Background jobs will need
-pinned file lifetimes and commit revalidation.
+Selection, ID reservation and publication run with the database mutex held.
+Manual compaction can release the mutex once its inputs are open and
+its independent workspace has been charged. One such merge can run per
+database. Other maintenance is excluded while it runs, preserving the
+selected SSTable ranges and protecting temporary outputs from reclamation.
+WAL rotation remains available. Publication revalidates selected file IDs
+and the level invariant, carries forward the live WAL references and
+high-water marks, and orders the combined catalog by file ID. The next
+executor can use this separation to support worker scheduling and
+cancellation.
 
 The planner orders source candidates by level and then ascending file ID.
 L0 may overlap. Every deeper level holds disjoint closed key ranges. When

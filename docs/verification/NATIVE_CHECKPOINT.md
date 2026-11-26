@@ -344,3 +344,14 @@ none` invocations. The first ran `put 6b 6f6c64`, `flush`, `put 6b 6e6577`,
 
 V043 ran the V022 Clang analysis command over the final core, storage and
 CLI sources. It exited successfully with no diagnostics.
+
+## Detached manual compaction merge
+
+V044 ran GCC and CTest from the previous checkpoint in `/tmp/resume` and
+passed 23 of 23. V045 reran the compiler and sanitizer matrix above with
+`/tmp/p36-$profile` as the build directory and passed 23 of 23 per profile.
+The new concurrency case stops before the first output-table write,
+performs a disk lookup, writes enough to rotate the WAL, and verifies
+`FASTDB_BUSY` for competing flush, compaction and close. It resumes the
+merge, writes again, and reopens to verify the new WAL data and masking
+tombstone.

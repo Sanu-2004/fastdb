@@ -7,6 +7,7 @@ typedef struct ReadGate {
     pthread_mutex_t mutex;
     pthread_cond_t condition;
     pthread_t foreground;
+    unsigned writes_until_pause;
     bool entered;
     bool release;
 } ReadGate;
@@ -22,10 +23,12 @@ static FDBFsFault hold_open(void *context, FDBFsOp operation, size_t size)
 {
     (void)size;
     ReadGate *gate = context;
-    if (operation != FDB_FS_OPEN || pthread_equal(pthread_self(), gate->foreground))
+    if (pthread_equal(pthread_self(), gate->foreground))
         return (FDBFsFault){0};
     CHECK(pthread_mutex_lock(&gate->mutex) == 0);
-    if (!gate->entered) {
+    bool pause = gate->writes_until_pause == 0 ? operation == FDB_FS_OPEN :
+                 operation == FDB_FS_WRITE && --gate->writes_until_pause == 0;
+    if (pause && !gate->entered) {
         gate->entered = true;
         CHECK(pthread_cond_signal(&gate->condition) == 0);
         while (!gate->release)
@@ -207,9 +210,58 @@ static void across_background_flush(void)
     remove_disk_fixture(path);
 }
 
+static void *compact_db(void *arg)
+{
+    OK(fastdb_compact(arg));
+    return NULL;
+}
+
+static void writes_during_compaction(void)
+{
+    char path[] = "/tmp/fastdb-compaction-write.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
+    ReadGate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
+                     .foreground = pthread_self(), .writes_until_pause = 2};
+    const FDBFs fs = {hold_open, &gate};
+    FastDB *db;
+    OK(fdb_open_with_fs(options, &fs, &db));
+    OK(fastdb_put(db, "k", 1, "old", 3));
+    OK(fastdb_flush(db));
+    pthread_t compactor;
+    CHECK(pthread_create(&compactor, NULL, compact_db, db) == 0);
+    wait_read(&gate);
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){"old", 3}, 1);
+    char large[120] = {1};
+    OK(fastdb_put(db, "a", 1, large, sizeof(large)));
+    OK(fastdb_put(db, "b", 1, large, sizeof(large)));
+    OK(fastdb_put(db, "c", 1, large, sizeof(large)));
+    OK(fastdb_delete(db, "k", 1));
+    STATUS(fastdb_compact(db), FASTDB_BUSY);
+    STATUS(fastdb_flush(db), FASTDB_BUSY);
+    STATUS(fastdb_close(db), FASTDB_BUSY);
+    finish_read(&gate, compactor);
+    OK(fastdb_put(db, "d", 1, NULL, 0));
+    OK(fastdb_close(db));
+    destroy_gate(&gate);
+    OK(fastdb_open(options, &db));
+    expect_missing(db, (FastDBSlice){"k", 1});
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){large, sizeof(large)}, 2);
+    expect_value(db, (FastDBSlice){"c", 1}, (FastDBSlice){large, sizeof(large)}, 4);
+    expect_value(db, (FastDBSlice){"d", 1}, (FastDBSlice){0}, 6);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     across_compaction(false);
     across_compaction(true);
     across_background_flush();
+    writes_during_compaction();
 }
