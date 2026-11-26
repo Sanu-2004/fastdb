@@ -170,12 +170,17 @@ static void concurrent_build(int error)
     }
     OK(fastdb_flush(db));
     check_visible(db);
+    OK(fastdb_put(db, "q", 1, new_bytes.data, new_bytes.size));
+    expect_value(db, (FastDBSlice){"q", 1}, new_bytes, 8);
+    OK(fastdb_delete(db, "q", 1));
+    expect_missing(db, (FastDBSlice){"q", 1});
     OK(fastdb_close(db));
     CHECK(pthread_cond_destroy(&gate.condition) == 0);
     CHECK(pthread_mutex_destroy(&gate.mutex) == 0);
     OK(fastdb_options_set_lsm_flush_threshold(options, 0));
     OK(fastdb_open(options, &db));
     check_visible(db);
+    expect_missing(db, (FastDBSlice){"q", 1});
     OK(fastdb_close(db));
     fastdb_options_destroy(options);
     remove_disk_fixture(path);

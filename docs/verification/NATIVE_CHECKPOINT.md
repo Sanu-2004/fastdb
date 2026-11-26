@@ -539,3 +539,44 @@ full CTest passed 23/23 each using `/tmp/p37fd2-gcc`, `/tmp/p37fd2-clang`,
 and `/tmp/p37fd2-asan` in the read-only toolchain container. The Docker
 Release build also passed 23/23. The failed 8-FD assertion was reproduced
 before the correction; all post-correction checks passed.
+
+## Frozen-slot backpressure retry
+
+V059 extends `tests/native/background_flush.c`: while the immutable slot is
+occupied, the existing gated writer observes `FASTDB_BUSY`; after flush
+publication releases the slot, `concurrent_build` successfully writes key
+`q` at revision 8, deletes it, and confirms that it remains absent after
+close/reopen. The fixture's injected ENOSPC mode additionally exercises the
+successful retry route after the failed maintenance attempt. This adds
+verification for the admission boundary; it did not require an engine code
+change.
+
+Focused command (Linux toolchain image, source mounted read-only at `/repo`):
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-queue-retry -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-queue-retry --parallel
+ctest --test-dir /tmp/p37-queue-retry -R fastdb_background_flush --output-on-failure
+```
+
+Focused result: 1/1 passed. Full GCC Debug (`/tmp/p37q-gcc`), Clang Release
+(`/tmp/p37q-clang`), and GCC ASan/UBSan/LSan (`/tmp/p37q-asan`, leak
+detection enabled) each passed 23/23. These were run in
+`fastdb-local-toolchain:bookworm` with:
+
+```sh
+set -e
+CC=gcc cmake -S /repo -B /tmp/p37q-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37q-gcc --parallel
+ctest --test-dir /tmp/p37q-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p37q-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p37q-clang --parallel
+ctest --test-dir /tmp/p37q-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p37q-asan -DCMAKE_BUILD_TYPE=Debug -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37q-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37q-asan --output-on-failure
+```
+
+Finally, `docker build -t fastdb-native:local .` succeeded and the Dockerfile's
+GCC 12.2 Release CTest passed 23/23. TSan was not run; see blocker B004 in
+`PROGRESS.md`.
