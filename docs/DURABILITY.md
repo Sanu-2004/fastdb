@@ -32,6 +32,17 @@ Reopen to determine whether the mutation is present. Clean close syncs
 asynchronous WAL writes and reports failure. Group commit and periodic WAL
 sync policies remain pending.
 
+Persistent options can set `min_free_bytes` as an advisory free-space
+headroom floor. Before WAL append, FastDB checks `statvfs` available bytes
+against the encoded frame plus that floor, adding a new segment header and
+maximum catalog image when rotation is needed. Before flush/checkpoint it uses
+an estimated SSTable size plus the maximum catalog image; before compaction it
+budgets twice the selected input bytes plus the maximum catalog image. Low headroom rejects admission with
+`FASTDB_LIMIT_EXCEEDED`; query errors propagate as `FASTDB_IO_ERROR`. The
+query does not reserve blocks, account reliably for quotas on all filesystems,
+or prevent other writers from consuming space between check and write. This
+does not change the handling of an actual short write or later sync failure.
+
 A recognized short final frame header, or a valid final header followed by a
 short payload, is omitted from recovery. The reader truncates that tail and
 syncs the truncation. A complete invalid header or payload fails recovery

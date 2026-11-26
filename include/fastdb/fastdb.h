@@ -71,6 +71,8 @@ typedef struct FastDBPersistentOptions {
     size_t max_catalog_bytes;
     unsigned int bloom_bits_per_key;
     size_t checkpoint_wal_segments;
+    /* Keep at least this many bytes free after each persistent write. Zero disables checks. */
+    uint64_t min_free_bytes;
 } FastDBPersistentOptions;
 
 typedef struct FastDBCompactionOptions {

@@ -415,3 +415,27 @@ next returned `VALUE 1 76616c7565` for `get 6b`. The image ran as UID/GID
 These tests establish the exercised interleavings and process-level restart
 behavior only. They do not establish TSan, physical power-loss behavior,
 quota-aware free-space reservation, or release-scale resource bounds.
+
+## Configurable free-space admission (initial P3.7 slice)
+
+V054 ran `docker build -t fastdb-native:local .` with the legacy Docker
+builder. GCC 12.2 configured and compiled the Release image, and all 23 CTest
+cases passed. The filesystem fixture exercises an injected `statvfs`
+availability value and EIO. The public persistent LSM fixture sets a 1 KiB
+`min_free_bytes`, verifies a failed query returns `FASTDB_IO_ERROR` without
+advancing the revision, verifies insufficient headroom returns
+`FASTDB_LIMIT_EXCEEDED` without a mutation, verifies the write succeeds once
+headroom is restored, then verifies flush refusal preserves the value and
+flush retry succeeds. The estimate includes frame bytes, rotation segment
+header and max manifest image for WAL admission; record-based table estimate
+and max manifest image for flush/checkpoint; twice selected input bytes and
+max manifest image for compaction.
+
+During development, one Docker build failed under warnings-as-errors because
+test fault structs had partial positional initializers after being extended.
+The next CTest run exposed an EIO fixture that had not set its failure call
+count. Both fixture defects were corrected; the final complete build/test
+command above passed. Clang, ASan/UBSan/LSan, TSan, and headroom arithmetic
+boundary tests were not run for V054. The query is advisory and does not
+reserve blocks or account for all quotas/metadata or concurrent outside
+writers.

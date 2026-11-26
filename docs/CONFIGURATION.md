@@ -44,6 +44,20 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 | `max_catalog_bytes` | 512 KiB | Encoded catalog |
 | `bloom_bits_per_key` | 10 | Bit budget per record, zero disables writing filters |
 | `checkpoint_wal_segments` | 0 | Persistent memory uses up to eight segments, bounded by the catalog limit. A nonzero value configures the threshold. LSM requires zero. |
+| `min_free_bytes` | 0 | Minimum filesystem-available bytes to preserve after a WAL append or estimated flush, checkpoint, or compaction output. Zero disables the check. |
+
+When `min_free_bytes` is nonzero, persistent writes query available filesystem
+space before appending the WAL frame; if the append requires WAL rotation, the
+estimate includes a new segment header and one maximum catalog image.
+Flush/checkpoint admission estimates table output from records plus one
+maximum catalog image. Compaction conservatively budgets twice the input file
+bytes plus one maximum catalog image. A low estimate returns
+`FASTDB_LIMIT_EXCEEDED` before the operation
+starts. A failed space query returns `FASTDB_IO_ERROR`. These checks are
+admission estimates, not reservations: another process, filesystem quota, or
+metadata overhead can consume space after the query. `statvfs` availability
+may not reflect per-user quotas on every filesystem. Actual write failures
+still follow the normal I/O/uncertain-commit rules.
 
 Persistent modes reserve workspace for catalog edits and one table reader or
 writer. The remaining budget covers active records, supported scan pages, WAL

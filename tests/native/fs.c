@@ -15,6 +15,8 @@ typedef struct Injection {
     size_t chunk;
     size_t calls;
     size_t fail_on;
+    bool space_override;
+    uint64_t available_bytes;
 } Injection;
 
 static FDBFsFault inject(void *context, FDBFsOp op, size_t requested)
@@ -23,6 +25,9 @@ static FDBFsFault inject(void *context, FDBFsOp op, size_t requested)
     Injection *injection = context;
     if (op != injection->operation)
         return (FDBFsFault){0};
+    if (op == FDB_FS_SPACE && injection->space_override)
+        return (FDBFsFault){.space_override = true,
+                            .available_bytes = injection->available_bytes};
     ++injection->calls;
     if (injection->interrupt_first && injection->calls == 1)
         return (FDBFsFault){.error = EINTR};
@@ -51,7 +56,8 @@ static void test_io(FDBDirectory *dir, Injection *injection, int fd)
     const char payload[] = "new data";
     size_t done;
     uint64_t size;
-    *injection = (Injection){FDB_FS_WRITE, ENOSPC, true, 2, 0, 3};
+    *injection = (Injection){.operation = FDB_FS_WRITE, .error = ENOSPC,
+                            .interrupt_first = true, .chunk = 2, .fail_on = 3};
     STATUS(fdb_fs_write(&dir->fs, fd, large_offset, payload, sizeof(payload), &done),
            FASTDB_IO_ERROR);
     CHECK(done == 2 && injection->calls == 3);
@@ -62,7 +68,8 @@ static void test_io(FDBDirectory *dir, Injection *injection, int fd)
     CHECK(done == sizeof(payload) && injection->calls > 3);
 
     char buffer[sizeof(payload) + 1] = {0};
-    *injection = (Injection){FDB_FS_READ, EIO, true, 3, 0, 3};
+    *injection = (Injection){.operation = FDB_FS_READ, .error = EIO,
+                            .interrupt_first = true, .chunk = 3, .fail_on = 3};
     STATUS(fdb_fs_read(&dir->fs, fd, large_offset, buffer, sizeof(buffer), &done), FASTDB_IO_ERROR);
     CHECK(done == 3 && memcmp(buffer, payload, done) == 0);
     *injection = (Injection){.operation = FDB_FS_READ, .interrupt_first = true, .chunk = 3};
@@ -73,12 +80,14 @@ static void test_io(FDBDirectory *dir, Injection *injection, int fd)
     STATUS(fdb_fs_write(&dir->fs, fd, INT64_MAX, payload, 1, &done), FASTDB_LIMIT_EXCEEDED);
     CHECK(done == 0);
 
-    *injection = (Injection){FDB_FS_SYNC, EIO, true, 0, 0, 2};
+    *injection = (Injection){.operation = FDB_FS_SYNC, .error = EIO,
+                            .interrupt_first = true, .fail_on = 2};
     STATUS(fdb_fs_sync(&dir->fs, fd), FASTDB_IO_ERROR);
     CHECK(injection->calls == 2);
     OK(fdb_fs_sync(&dir->fs, fd));
 
-    *injection = (Injection){FDB_FS_TRUNCATE, EIO, true, 0, 0, 2};
+    *injection = (Injection){.operation = FDB_FS_TRUNCATE, .error = EIO,
+                            .interrupt_first = true, .fail_on = 2};
     STATUS(fdb_fs_truncate(&dir->fs, fd, 0), FASTDB_IO_ERROR);
     OK(fdb_fs_size(fd, &size));
     CHECK(size == large_offset + sizeof(payload));
@@ -98,6 +107,13 @@ int main(void)
     CHECK(injection.calls == 2);
     CHECK((fcntl(dir.fd, F_GETFD) & FD_CLOEXEC) != 0);
     CHECK((fcntl(dir.lock_fd, F_GETFD) & FD_CLOEXEC) != 0);
+    uint64_t available;
+    injection = (Injection){.operation = FDB_FS_SPACE, .space_override = true,
+                            .available_bytes = 123456};
+    OK(fdb_dir_available_bytes(&dir, &available));
+    CHECK(available == 123456);
+    injection = (Injection){.operation = FDB_FS_SPACE, .error = EIO, .fail_on = 1};
+    STATUS(fdb_dir_available_bytes(&dir, &available), FASTDB_IO_ERROR);
     check_lock(path);
 
     int fd;
@@ -118,7 +134,7 @@ int main(void)
     CHECK(duplicate == -1);
     test_io(&dir, &injection, fd);
     OK(fdb_fs_close(fd));
-    injection = (Injection){FDB_FS_RENAME, EIO, false, 0, 0, 1};
+    injection = (Injection){.operation = FDB_FS_RENAME, .error = EIO, .fail_on = 1};
     STATUS(fdb_dir_rename(&dir, "pending", "published"), FASTDB_IO_ERROR);
     STATUS(fdb_dir_open_file(&dir, "published", FDB_FILE_READ, &fd), FASTDB_NOT_FOUND);
     OK(fdb_dir_rename_new(&dir, "pending", "published"));

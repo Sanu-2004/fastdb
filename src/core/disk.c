@@ -24,6 +24,7 @@ struct FDBDisk {
     size_t table_workspace;
     bool compaction_cleanup_needed;
     bool compaction_flush_allowed;
+    uint64_t min_free_bytes;
 };
 
 static const FastDBPersistentOptions defaults = {
@@ -36,6 +37,7 @@ static const FastDBPersistentOptions defaults = {
     .max_catalog_files = 128,
     .max_catalog_bytes = 512 * 1024,
     .bloom_bits_per_key = 10,
+    .min_free_bytes = 0,
 };
 
 void fastdb_persistent_options_default(FastDBPersistentOptions *options)
@@ -112,6 +114,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     };
     disk->mode = options->mode;
     disk->durability = storage->durability;
+    disk->min_free_bytes = storage->min_free_bytes;
     size_t default_segments = storage->max_catalog_files <= 8 ? storage->max_catalog_files - 1 : 8;
     disk->checkpoint_wal_segments = storage->checkpoint_wal_segments == 0 ?
                                     default_segments : storage->checkpoint_wal_segments;
@@ -273,8 +276,62 @@ FastDBStatus fdb_disk_frame_size(const FDBDisk *disk, const FDBRecord *records,
     return fdb_wal_frame_size(&disk->log.wal, records, count, bytes);
 }
 
+static FastDBStatus check_free_space(const FDBDisk *disk, uint64_t reservation)
+{
+    if (disk->min_free_bytes == 0)
+        return FASTDB_OK;
+    if (reservation > UINT64_MAX - disk->min_free_bytes)
+        return FASTDB_LIMIT_EXCEEDED;
+    uint64_t available;
+    FastDBStatus status = fdb_dir_available_bytes(&disk->dir, &available);
+    if (status != FASTDB_OK)
+        return status;
+    return available >= reservation + disk->min_free_bytes ? FASTDB_OK :
+           FASTDB_LIMIT_EXCEEDED;
+}
+
+static FastDBStatus estimate_tree_file_bytes(const FDBDisk *disk, const FDBTree *tree,
+                                              uint64_t *estimate)
+{
+    uint64_t total = 0;
+    for (const FDBNode *node = fdb_tree_bound(tree, (FastDBSlice){0}, false); node != NULL;
+         node = fdb_tree_bound(tree, node->record.key, true)) {
+        uint64_t key = node->record.key.size;
+        uint64_t value = node->record.value.size;
+        uint64_t record;
+        if (key > UINT64_MAX - value || key + value > UINT64_MAX - 160u)
+            return FASTDB_LIMIT_EXCEEDED;
+        record = key + value + 160u;
+        uint64_t filter = ((uint64_t)disk->table.bloom_bits_per_key + 7u) / 8u;
+        uint64_t index = (uint64_t)node->record.key.size + 32u;
+        if (record > UINT64_MAX - filter || record + filter > UINT64_MAX - index ||
+            total > UINT64_MAX - (record + filter + index))
+            return FASTDB_LIMIT_EXCEEDED;
+        total += record + filter + index;
+    }
+    if (total > UINT64_MAX - disk->manifest.max_bytes)
+        return FASTDB_LIMIT_EXCEEDED;
+    *estimate = total + disk->manifest.max_bytes;
+    return FASTDB_OK;
+}
+
 FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count)
 {
+    size_t frame_bytes;
+    FastDBStatus status = fdb_wal_frame_size(&disk->log.wal, records, count, &frame_bytes);
+    uint64_t reservation = frame_bytes;
+    if (status == FASTDB_OK &&
+        frame_bytes > disk->wal.max_segment_bytes - disk->log.wal.offset) {
+        uint64_t overhead = FDB_WAL_HEADER_BYTES + disk->manifest.max_bytes;
+        if (reservation > UINT64_MAX - overhead)
+            status = FASTDB_LIMIT_EXCEEDED;
+        else
+            reservation += overhead;
+    }
+    if (status == FASTDB_OK)
+        status = check_free_space(disk, reservation);
+    if (status != FASTDB_OK)
+        return status;
     return fdb_wal_set_append(&disk->log, records, count, disk->durability == FASTDB_DURABILITY_SYNC);
 }
 
@@ -419,7 +476,12 @@ FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
         return FASTDB_UNSUPPORTED;
     if (disk->compaction_bytes != 0 && !disk->compaction_flush_allowed)
         return FASTDB_BUSY;
-    FastDBStatus status = fdb_storage_prepare_maintenance(&disk->log);
+    uint64_t estimate;
+    FastDBStatus status = estimate_tree_file_bytes(disk, tree, &estimate);
+    if (status == FASTDB_OK)
+        status = check_free_space(disk, estimate);
+    if (status == FASTDB_OK)
+        status = fdb_storage_prepare_maintenance(&disk->log);
     if (status == FASTDB_OK)
         status = fdb_flush_l0(&disk->log, tree, disk->log.wal.sequence, &disk->table);
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
@@ -429,7 +491,12 @@ FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequen
 {
     if (disk->compaction_bytes != 0)
         return FASTDB_BUSY;
-    FastDBStatus ready = fdb_storage_prepare_maintenance(&disk->log);
+    uint64_t estimate;
+    FastDBStatus ready = estimate_tree_file_bytes(disk, tree, &estimate);
+    if (ready == FASTDB_OK)
+        ready = check_free_space(disk, estimate);
+    if (ready == FASTDB_OK)
+        ready = fdb_storage_prepare_maintenance(&disk->log);
     if (ready != FASTDB_OK)
         return ready;
     if (disk->log.pinned_read_bytes != 0)
@@ -544,6 +611,25 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         }
         for (size_t i = 0; i < plan.count; ++i)
             input_ids[i] = disk->log.catalog.view.entries[inputs[i]].id;
+        uint64_t output_estimate = 0;
+        for (size_t i = 0; i < plan.count; ++i) {
+            uint64_t bytes = disk->log.catalog.view.entries[inputs[i]].bytes;
+            if (bytes > UINT64_MAX / 2 || output_estimate > UINT64_MAX - bytes * 2) {
+                status = FASTDB_LIMIT_EXCEEDED;
+                break;
+            }
+            output_estimate += bytes * 2;
+        }
+        if (status == FASTDB_OK) {
+            if (output_estimate > UINT64_MAX - disk->manifest.max_bytes)
+                status = FASTDB_LIMIT_EXCEEDED;
+            else
+                output_estimate += disk->manifest.max_bytes;
+        }
+        if (status == FASTDB_OK)
+            status = check_free_space(disk, output_estimate);
+        if (status != FASTDB_OK)
+            break;
         limits.max_working_bytes = available - selection_bytes;
         size_t catalogs, charge = disk->writer_bytes + plan.count * input_bytes;
         pthread_mutex_t *mutex = NULL;
@@ -574,7 +660,12 @@ FastDBStatus fdb_disk_checkpoint(FDBDisk *disk, FDBTree *tree)
 {
     if (disk == NULL || disk->mode != FASTDB_MODE_MEMORY_PERSISTENT)
         return FASTDB_UNSUPPORTED;
-    FastDBStatus status = fdb_checkpoint_truncate_log(&disk->log, tree, &disk->table);
+    uint64_t estimate;
+    FastDBStatus status = estimate_tree_file_bytes(disk, tree, &estimate);
+    if (status == FASTDB_OK)
+        status = check_free_space(disk, estimate);
+    if (status == FASTDB_OK)
+        status = fdb_checkpoint_truncate_log(&disk->log, tree, &disk->table);
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 

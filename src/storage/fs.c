@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 _Static_assert(sizeof(off_t) == sizeof(int64_t), "FastDB requires 64-bit off_t");
@@ -187,6 +188,33 @@ FastDBStatus fdb_fs_size(int fd, uint64_t *size)
     if (!S_ISREG(info.st_mode) || info.st_size < 0)
         return FASTDB_CORRUPTION;
     *size = (uint64_t)info.st_size;
+    return FASTDB_OK;
+}
+
+FastDBStatus fdb_dir_available_bytes(const FDBDirectory *dir, uint64_t *bytes)
+{
+    if (dir == NULL || dir->fd < 0 || bytes == NULL)
+        return FASTDB_INVALID_ARGUMENT;
+    FDBFsFault injection = fault(&dir->fs, FDB_FS_SPACE, 0);
+    if (injection.error != 0)
+        return file_error(injection.error);
+    if (injection.space_override) {
+        *bytes = injection.available_bytes;
+        return FASTDB_OK;
+    }
+    struct statvfs info;
+    int result;
+    do {
+        result = fstatvfs(dir->fd, &info);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0)
+        return file_error(errno);
+    uint64_t unit = info.f_frsize != 0 ? (uint64_t)info.f_frsize : (uint64_t)info.f_bsize;
+    uint64_t blocks = (uint64_t)info.f_bavail;
+    if (unit != 0 && blocks > UINT64_MAX / unit)
+        *bytes = UINT64_MAX;
+    else
+        *bytes = blocks * unit;
     return FASTDB_OK;
 }
 
