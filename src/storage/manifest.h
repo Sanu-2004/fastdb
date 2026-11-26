@@ -60,5 +60,8 @@ FastDBStatus fdb_manifest_publish(const FDBDirectory *dir, const FDBManifestLimi
 /* A successful reservation consumes the ID even if no database file is created. */
 FastDBStatus fdb_manifest_reserve_file(const FDBDirectory *dir, const FDBManifestLimits *limits,
                                         FDBManifest *current, uint64_t *id);
+/* Reserve count consecutive IDs in one edit. The returned first ID is valid only on OK. */
+FastDBStatus fdb_manifest_reserve_files(const FDBDirectory *dir, const FDBManifestLimits *limits,
+                                         FDBManifest *current, uint64_t count, uint64_t *first);
 
 #endif

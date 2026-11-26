@@ -18,8 +18,10 @@ This preserves non-overlap at both levels. Additional file splitting takes
 place between key groups within either portion of the job.
 
 Each staged or ordinary job commits one full catalog replacement after its
-outputs are durable. Durable ID reservations change the allocator and
-catalog generation while retaining the same input references. Failed jobs
+outputs are durable. One durable ID reservation advances the allocator by
+the job's output capacity while retaining the same input references.
+Streaming consumes IDs from that range without editing the catalog. Unused
+IDs remain consumed. Failed jobs
 leave the inputs authoritative until the committed replacement can be
 confirmed. Sequence high-water, distinct versions, tombstones and expiry
 metadata are preserved. Manual compaction stops after all selected ranges

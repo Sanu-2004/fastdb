@@ -325,3 +325,22 @@ marshalling split. The corrected commands use the CTest label.
 V040 rebuilt the native image and reran the volume restart checks above.
 The image ran as UID/GID 10001. Release CTest passed 23 of 23. Both LSM and
 persistent memory recovered the expected values from fresh containers.
+
+## Compaction output ID reservation
+
+V041 reran the GCC Debug, Clang Release and GCC ASan/UBSan/LSan matrix in
+`/tmp/fastdb-reserve-$profile`. All three passed 23 of 23. The manifest
+fixture checks refusal of an empty reservation, failure before rename,
+uncertainty after rename, the next allocation after reopen and exhaustion
+at the unsigned 64-bit boundary. A native compaction with a one-byte soft
+output target creates three tables, advances the manifest by one reservation
+and one installation, and recovers all three values across reopen.
+
+V042 rebuilt the native image with 23 of 23 tests passing. The same
+temporary LSM volume was mounted by separate `docker run --rm -i --network
+none` invocations. The first ran `put 6b 6f6c64`, `flush`, `put 6b 6e6577`,
+`flush`, and `compact`. The second ran `get 6b` and returned
+`VALUE 2 6e6577`. The image ran as UID/GID 10001.
+
+V043 ran the V022 Clang analysis command over the final core, storage and
+CLI sources. It exited successfully with no diagnostics.

@@ -398,19 +398,27 @@ FastDBStatus fdb_manifest_publish(const FDBDirectory *dir, const FDBManifestLimi
     return status;
 }
 
-FastDBStatus fdb_manifest_reserve_file(const FDBDirectory *dir, const FDBManifestLimits *limits,
-                                        FDBManifest *current, uint64_t *id)
+FastDBStatus fdb_manifest_reserve_files(const FDBDirectory *dir, const FDBManifestLimits *limits,
+                                         FDBManifest *current, uint64_t count, uint64_t *first)
 {
-    *id = 0;
-    if (current->next_file_id == UINT64_MAX || current->generation == UINT64_MAX)
+    *first = 0;
+    if (count == 0)
+        return FASTDB_INVALID_ARGUMENT;
+    if (count > UINT64_MAX - current->next_file_id || current->generation == UINT64_MAX)
         return FASTDB_LIMIT_EXCEEDED;
     FDBManifest next = *current;
-    ++next.next_file_id;
+    next.next_file_id += count;
     ++next.generation;
     FastDBStatus status = fdb_manifest_publish(dir, limits, current->generation, &next);
     if (status == FASTDB_OK) {
-        *id = current->next_file_id;
+        *first = current->next_file_id;
         *current = next;
     }
     return status;
+}
+
+FastDBStatus fdb_manifest_reserve_file(const FDBDirectory *dir, const FDBManifestLimits *limits,
+                                        FDBManifest *current, uint64_t *id)
+{
+    return fdb_manifest_reserve_files(dir, limits, current, 1, id);
 }

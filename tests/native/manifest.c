@@ -144,6 +144,39 @@ static void damage_catalog(const FDBDirectory *dir)
     CHECK(loaded.image == NULL && loaded.entries == NULL);
 }
 
+static void reserve_range(FDBDirectory *dir, Fault *fault)
+{
+    FDBManifest current;
+    OK(fdb_manifest_new(FDB_MODE_LSM, &current));
+    OK(fdb_manifest_publish(dir, &limits, 0, &current));
+    uint64_t first = 123;
+    STATUS(fdb_manifest_reserve_files(dir, &limits, &current, 0, &first), FASTDB_INVALID_ARGUMENT);
+    CHECK(first == 0 && current.next_file_id == 1);
+    *fault = (Fault){FDB_FS_RENAME, 1};
+    STATUS(fdb_manifest_reserve_files(dir, &limits, &current, 5, &first), FASTDB_IO_ERROR);
+    CHECK(first == 0 && snapshot(dir).next_file_id == 1);
+    OK(fdb_manifest_reserve_files(dir, &limits, &current, 5, &first));
+    CHECK(first == 1 && current.next_file_id == 6 && current.generation == 2);
+
+    *fault = (Fault){FDB_FS_SYNC, 2};
+    STATUS(fdb_manifest_reserve_files(dir, &limits, &current, 5, &first), FASTDB_COMMIT_UNCERTAIN);
+    CHECK(first == 0 && current.next_file_id == 6);
+    current = snapshot(dir);
+    CHECK(current.next_file_id == 11 && current.generation == 3);
+    OK(fdb_manifest_reserve_file(dir, &limits, &current, &first));
+    CHECK(first == 11 && current.next_file_id == 12);
+
+    FDBManifest near_limit = current;
+    ++near_limit.generation;
+    near_limit.next_file_id = UINT64_MAX - 2;
+    OK(fdb_manifest_publish(dir, &limits, current.generation, &near_limit));
+    STATUS(fdb_manifest_reserve_files(dir, &limits, &near_limit, 3, &first), FASTDB_LIMIT_EXCEEDED);
+    OK(fdb_manifest_reserve_files(dir, &limits, &near_limit, 2, &first));
+    CHECK(first == UINT64_MAX - 2 && near_limit.next_file_id == UINT64_MAX);
+    STATUS(fdb_manifest_reserve_file(dir, &limits, &near_limit, &first), FASTDB_LIMIT_EXCEEDED);
+    CHECK(first == 0 && snapshot(dir).next_file_id == UINT64_MAX);
+}
+
 int main(void)
 {
     char path[] = "/tmp/fastdb-manifest.XXXXXXXX";
@@ -154,6 +187,8 @@ int main(void)
     OK(fdb_dir_lock(path, &fs, &dir));
     test_catalog(&dir, &fault, path);
     damage_catalog(&dir);
+    OK(fdb_dir_unlink(&dir, "MANIFEST"));
+    reserve_range(&dir, &fault);
     OK(fdb_dir_unlink(&dir, "MANIFEST"));
     OK(fdb_dir_close(&dir));
     char lock_path[sizeof(path) + sizeof("/.fastdb.lock")];

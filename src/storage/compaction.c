@@ -10,6 +10,8 @@ typedef struct Build {
     const FDBCompactionPlan *plan;
     FDBManifestLoad candidate;
     size_t key_bytes;
+    uint64_t next_output_id;
+    uint64_t end_output_id;
 } Build;
 
 static FastDBStatus add_entry(Build *build, FDBManifestEntry entry)
@@ -27,13 +29,13 @@ static FastDBStatus add_entry(Build *build, FDBManifestEntry entry)
     return FASTDB_OK;
 }
 
-static FastDBStatus reserve(void *context, uint64_t *id)
+static FastDBStatus take_output_id(void *context, uint64_t *id)
 {
     Build *build = context;
-    FDBWalSet *set = build->set;
-    if (set->catalog.view.generation >= UINT64_MAX - 1)
+    if (build->next_output_id == build->end_output_id)
         return FASTDB_LIMIT_EXCEEDED;
-    return fdb_manifest_reserve_file(set->dir, &set->catalog_limits, &set->catalog.view, id);
+    *id = build->next_output_id++;
+    return FASTDB_OK;
 }
 
 static FastDBStatus finished(void *context, const char *temporary_name,
@@ -89,14 +91,20 @@ static FastDBStatus write_outputs(Build *build, const size_t *inputs, FDBMergeLi
     size_t outputs = set->catalog_limits.max_files - build->candidate.view.count;
     if (limits.max_outputs > outputs)
         limits.max_outputs = outputs;
-    if (limits.max_outputs == 0 || count > limits.max_working_bytes / sizeof(FDBSSTReader *))
+    uint64_t ids_left = UINT64_MAX - set->catalog.view.next_file_id;
+    if (limits.max_outputs > ids_left)
+        limits.max_outputs = (size_t)ids_left;
+    if (limits.max_outputs == 0 || count > limits.max_working_bytes / sizeof(FDBSSTReader *) ||
+        set->catalog.view.generation >= UINT64_MAX - 1)
         return FASTDB_LIMIT_EXCEEDED;
     limits.max_working_bytes -= count * sizeof(FDBSSTReader *);
     limits.split_after = build->plan->split_after;
     const FDBSSTReader **readers = calloc(count, sizeof(*readers));
     if (readers == NULL)
         return FASTDB_OUT_OF_MEMORY;
-    FastDBStatus status = FASTDB_OK;
+    FastDBStatus status = fdb_manifest_reserve_files(set->dir, &set->catalog_limits, &set->catalog.view,
+                                                     limits.max_outputs, &build->next_output_id);
+    build->end_output_id = set->catalog.view.next_file_id;
     for (size_t i = 0; status == FASTDB_OK && i < count; ++i) {
         FDBSSTReader *reader;
         status = fdb_catalog_open_table(set->dir, &set->catalog.view.entries[inputs[i]],
@@ -104,7 +112,7 @@ static FastDBStatus write_outputs(Build *build, const size_t *inputs, FDBMergeLi
         readers[i] = reader;
     }
     if (status == FASTDB_OK) {
-        const FDBMergeOutput output = {reserve, finished, build};
+        const FDBMergeOutput output = {take_output_id, finished, build};
         status = fdb_sst_merge_split(set->dir, readers, count, &limits, &output);
     }
     for (size_t i = 0; i < count; ++i) {

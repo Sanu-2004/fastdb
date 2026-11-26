@@ -73,7 +73,9 @@ durable publication. The synchronous flush path handles manual requests and
 retries after a known background error.
 
 Serial compaction keeps read access to the original SSTables while building
-its outputs. It reserves durable IDs, writes and syncs every temporary output,
+its outputs. One durable manifest edit reserves a bounded range of output
+IDs before streaming begins. Unused IDs remain consumed. The builder
+writes and syncs every temporary output,
 closes the inputs, renames the outputs and syncs the directory. One manifest
 replacement installs all outputs and removes the selected input references.
 That edit preserves the WAL references and covered revision. Once durable,

@@ -1,7 +1,7 @@
 #include "disk_fixture.h"
 #include "manifest.h"
 
-static void check_levels(const char *path, const size_t *counts, uint32_t levels)
+static uint64_t check_levels(const char *path, const size_t *counts, uint32_t levels)
 {
     FDBDirectory directory;
     OK(fdb_dir_lock(path, NULL, &directory));
@@ -17,8 +17,10 @@ static void check_levels(const char *path, const size_t *counts, uint32_t levels
         }
         CHECK(actual == counts[level]);
     }
+    uint64_t generation = catalog.view.generation;
     fdb_manifest_release(&catalog);
     OK(fdb_dir_close(&directory));
+    return generation;
 }
 
 static void staged_and_reopen(void)
@@ -154,9 +156,44 @@ static void workspace_limit(void)
     remove_disk_fixture(path);
 }
 
+static void reserve_split_outputs_in_one_edit(void)
+{
+    char path[] = "/tmp/fastdb-compact-ids.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions compaction;
+    fastdb_compaction_options_default(&compaction);
+    compaction.max_levels = 2;
+    compaction.target_file_bytes = 1;
+    OK(fastdb_options_set_compaction(options, &compaction));
+
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "a", 1));
+    OK(fastdb_put(db, "b", 1, "b", 1));
+    OK(fastdb_put(db, "c", 1, "c", 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    uint64_t before = check_levels(path, (size_t[]){1, 0}, 2);
+    OK(fastdb_open(options, &db));
+    OK(fastdb_compact(db));
+    OK(fastdb_close(db));
+    uint64_t after = check_levels(path, (size_t[]){0, 3}, 2);
+    CHECK(after == before + 2);
+
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"a", 1}, 1);
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){"b", 1}, 2);
+    expect_value(db, (FastDBSlice){"c", 1}, (FastDBSlice){"c", 1}, 3);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     staged_and_reopen();
     auto_cascade_and_disable();
     workspace_limit();
+    reserve_split_outputs_in_one_edit();
 }
