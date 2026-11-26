@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `a2b870c` / `main`. V050–V053 verify P3.6; V054 verifies the initial P3.7 headroom slice.
+**Last verified base commit / branch:** `a1a7b53` / `main`. V050–V053 verify P3.6; V054 verifies the initial P3.7 headroom slice.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -418,9 +418,9 @@ These are deliberate boundaries, not completed features:
 - Started from pushed `a2b870c` on `main`. Added `FastDBPersistentOptions.min_free_bytes`, the fault-injectable `FDB_FS_SPACE` hook, and a `statvfs` query against the locked database directory.
 - Persistent WAL appends preflight encoded frame bytes plus configured headroom; rotation adds a segment header and maximum catalog image. Flush/checkpoint estimate table bytes from records plus maximum catalog image; compaction budgets twice selected input bytes plus maximum catalog image. Low-space admission returns `FASTDB_LIMIT_EXCEEDED`; space query failures propagate. Added docs describing estimates and TOCTOU/quota limits.
 - Docker first compile caught test-only issues: fault fixture omitted the newly added override fields and warning-as-error rejected old partial initializers. First CTest then exposed a fixture that failed to trigger EIO. Both were fixed. Final V054 Docker Linux Release build passed all 23/23 tests.
-- Changes remain uncommitted after V054; new P3.7 implementation and regression work is in `include/fastdb/fastdb.h`, `src/storage/{fs.c,fs.h}`, `src/core/disk.c`, `tests/native/{fs.c,lsm_fault.c}`, `docs/CONFIGURATION.md`, `docs/DURABILITY.md`, the native verification log, and this ledger.
+- Committed and pushed this tested slice as `a1a7b53` (`Add configurable persistent disk headroom checks`).
 - V054 is the latest run: `docker build -t fastdb-native:local .` completed and its Linux GCC 12.2 Release CTest passed 23/23. The low-space fixture verifies query-error and limit failures leave revision/data unchanged; successful retry and flush preserve data. An earlier compile and a first fixture run failed during development and were corrected; only the final full run is PASS. Exact command/result scope is in [native verification](docs/verification/NATIVE_CHECKPOINT.md).
-- Next: add arithmetic-boundary and compaction-admission coverage, run Clang and ASan/UBSan/LSan matrices, then commit and push this P3.7 slice. Continue bounded queue/memory/FD budgets; do not mark P3.7 DONE yet.
+- Next: add arithmetic-boundary and compaction-admission coverage, run Clang and ASan/UBSan/LSan matrices. Continue bounded queue/memory/FD budgets; do not mark P3.7 DONE yet.
 
 ## 9. Current handoff
 
@@ -428,8 +428,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Finish P3.7: add arithmetic-boundary and compaction-admission tests; run Clang Release and ASan/UBSan/LSan suites. Review advisory disk-space behavior and continue through bounded queue/memory/FD budgets and safe maintenance errors before moving to P3.8.
 - **Next commands:** Build/test with GCC Debug, Clang Release, and GCC ASan/UBSan/LSan using the commands in [native verification](docs/verification/NATIVE_CHECKPOINT.md). Exercise the new `fastdb_lsm_fault` cases. Rebuild the Docker image after additional P3.7 changes, then commit and push the verified slice.
-- **Last verified good checkpoint:** P3.6 commit `a2b870c` is pushed. V054 is a working-tree checkpoint with GCC Release Docker build and 23/23 CTests. Clang/sanitizers for P3.7 have not run. TSan remains blocked as B004.
-- **Working-tree state:** P3.7 initial implementation/docs/tests plus this ledger are uncommitted, based on `a2b870c`. No owner data was opened in tests.
+- **Last verified good checkpoint:** P3.6 commit `a2b870c` and initial P3.7 headroom slice `a1a7b53` are pushed. V054 on `a1a7b53` records GCC Release Docker build and 23/23 CTests. Clang/sanitizers for P3.7 have not run. TSan remains blocked as B004.
+- **Working-tree state:** The implementation and V054 records are pushed in `a1a7b53`; this ledger correction is the only uncommitted edit while preparing this handoff. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.7 can proceed locally with normal builds and other sanitizers.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Disk headroom is advisory and currently checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Full P3.7 queue/FD/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
