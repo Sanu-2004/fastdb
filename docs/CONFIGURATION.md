@@ -103,10 +103,13 @@ or retained history.
 also processes overlapping destination files. The lower bound is inclusive
 unless `start_exclusive` is set. The upper bound is exclusive. Null/zero
 bounds are open and equal nonempty bounds select no files. Active data can
-be flushed separately. Compaction remains synchronous. A flush can report a
-compaction error after its L0 table is durable. The flush worker can also
-invoke the serial scheduler after publication. Size-tiered compaction,
-background compaction and history garbage collection are pending.
+be flushed separately. Manual compaction remains synchronous. When the
+optional flush worker is enabled, it schedules at most one automatic
+compaction after L0 publication. With sufficient headroom, that worker
+compaction streams outside the database mutex and allows a foreground L0
+flush; otherwise it uses the serialized path. A flush can report a compaction
+error after its L0 table is durable. Size-tiered compaction and history
+garbage collection are pending.
 
 The engine uses no automatic eviction. Workspace charges describe
 engine-requested allocations and reserved capacity. See

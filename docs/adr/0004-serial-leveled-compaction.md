@@ -3,15 +3,15 @@
 Status: Accepted
 
 Selection, ID reservation and publication run with the database mutex held.
-Manual compaction can release the mutex once its inputs are open and
-its independent workspace has been charged. One such merge can run per
-database. Other maintenance is excluded while it runs, preserving the
-selected SSTable ranges and protecting temporary outputs from reclamation.
-WAL rotation remains available. Publication revalidates selected file IDs
-and the level invariant, carries forward the live WAL references and
-high-water marks, and orders the combined catalog by file ID. The next
-executor can use this separation to support worker scheduling and
-cancellation.
+Manual compaction and an automatic compaction running on the optional worker
+can release the mutex once their inputs are open and independent workspace
+has been charged. One compaction merge runs per database. Worker compaction
+allows a foreground L0 flush while it streams. Stable input IDs, protected
+temporary output reservations and destination-closure revalidation preserve
+the selected ranges as the catalog changes. Other compactions remain
+excluded. Publication carries forward live WAL and new L0 references and
+high-water marks, then orders the combined catalog by file ID. A merge with
+insufficient workspace remains serialized.
 
 The planner orders source candidates by level and then ascending file ID.
 L0 may overlap. Every deeper level holds disjoint closed key ranges. When

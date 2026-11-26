@@ -224,7 +224,7 @@ static void *flush_worker(void *arg)
         if (flush->compaction_pending) {
             flush->compaction_pending = false;
             flush->compaction_running = true;
-            flush->compaction_error = fdb_disk_compact(db, false, NULL);
+            flush->compaction_error = fdb_disk_compact(db, false, true, NULL);
             flush->compaction_running = false;
             pthread_cond_broadcast(&flush->condition);
             continue;
@@ -374,19 +374,21 @@ FastDBStatus fastdb_flush(FastDB *db)
     pthread_mutex_lock(&db->mutex);
     FDBBackgroundFlush *flush = db->flush;
     FastDBStatus status = FASTDB_OK;
+    bool background_compaction = false;
     if (flush != NULL) {
         ++flush->waiters;
-        while ((flush->frozen.count != 0 || flush->compaction_pending ||
-                flush->compaction_running) && flush->error == FASTDB_OK)
+        while ((flush->frozen.count != 0 || flush->compaction_pending) &&
+               flush->error == FASTDB_OK)
             pthread_cond_wait(&flush->condition, &db->mutex);
         --flush->waiters;
+        background_compaction = flush->compaction_running;
         if (flush->frozen.count != 0)
             status = fdb_disk_retry_frozen(db->disk, &flush->frozen, flush->frozen_sequence);
     }
     if (status == FASTDB_OK)
         status = fdb_disk_flush(db->disk, &db->tree);
-    if (status == FASTDB_OK)
-        status = fdb_disk_compact(db, false, NULL);
+    if (status == FASTDB_OK && !background_compaction)
+        status = fdb_disk_compact(db, false, false, NULL);
     if (flush != NULL) {
         if (status != FASTDB_BUSY)
             flush->error = status;
@@ -411,7 +413,7 @@ FastDBStatus fastdb_compact_range(FastDB *db, const FastDBRange *range)
     else if (db->flush != NULL && db->flush->frozen.count != 0 && db->flush->error == FASTDB_OK)
         status = FASTDB_BUSY;
     else
-        status = fdb_disk_compact(db, true, range);
+        status = fdb_disk_compact(db, true, false, range);
     if (db->flush != NULL)
         pthread_cond_broadcast(&db->flush->condition);
     pthread_mutex_unlock(&db->mutex);

@@ -71,6 +71,18 @@ compaction validates input IDs, retains the live WAL entries, and publishes
 the replacement catalog. Automatic compaction and manual compaction with
 insufficient independent workspace use the existing serialized path.
 
+When automatic compaction runs on the optional flush worker with sufficient
+workspace, it uses the detached merge path. A foreground `fastdb_flush` may
+then publish a new L0 table while selected inputs are streaming. The compaction
+job stores stable input file IDs rather than catalog indexes, protects its
+reserved temporary output ID range from orphan cleanup, and revalidates the
+selected inputs and destination overlap closure against the current catalog
+before publication. The catalog edit carries forward the concurrently
+published L0 table and current WAL references. Compactions remain mutually
+exclusive; when detached workspace is unavailable, maintenance stays
+serialized. Foreground writes still apply threshold backpressure while the
+worker is compacting.
+
 `fastdb_flush` waits for a running flush, retries frozen work after a known
 failure and then flushes the active tree synchronously. Close signals the
 worker and joins it before releasing storage. In-flight work finishes or
@@ -82,8 +94,8 @@ compaction on the same per-database worker. The worker tracks flush and
 compaction errors separately: a failed compaction does not mark a successfully
 published immutable table as failed or block foreground writes on the frozen
 tree error path. `fastdb_flush` waits for queued or active worker compaction
-before running its synchronous maintenance path. Close cancels a queued
-compaction and joins the worker; an active merge is allowed to finish before
-storage handles are released. This first increment keeps all SSTable
-maintenance exclusive, and does not permit concurrent L0 publication during a
-merge.
+before starting a synchronous maintenance path. If a worker merge is already
+detached, the caller may flush its active tree concurrently; the worker then
+publishes against the updated catalog. Close cancels a queued compaction and
+joins the worker; an active merge is allowed to finish before storage handles
+are released. Other compactions and L0 flush jobs remain exclusive.

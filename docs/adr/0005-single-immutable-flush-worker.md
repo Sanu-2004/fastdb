@@ -25,10 +25,14 @@ explicit flush. Uncertain publication keeps the old references until
 reopen. The worker stops before the engine releases its storage handle.
 
 The optional worker also schedules at most one automatic compaction after a
-successful L0 flush. It uses the existing detached merge path, while retaining
-the single-maintenance exclusion. A queued compaction can be cancelled during
-close; a running merge is drained and joined. Flush publication errors and
-compaction errors are tracked separately because a successful flush remains
-authoritative even if the later compaction fails. A subsequent explicit flush
-can retry maintenance. Tests verify the level transition and reopen with one
-remaining L0 table and one L1 output when the L0 trigger is two.
+successful L0 flush. With sufficient workspace it uses the detached merge
+path, allowing a foreground flush to publish a new L0 table while merge
+outputs are being built. The selected input IDs and destination overlap
+closure are revalidated against the updated catalog before publication.
+Reserved temporary output IDs are protected from the foreground flush's
+orphan cleanup. A queued compaction can be cancelled during close; a running
+merge is drained and joined. Flush publication errors and compaction errors
+are tracked separately because a successful flush remains authoritative even
+if the later compaction fails. An explicit flush retries maintenance. Tests
+verify the level transition, concurrent L0 publication, injected output
+failure, close during merge, and reopen with all values retained.

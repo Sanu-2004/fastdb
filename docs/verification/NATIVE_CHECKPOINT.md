@@ -366,8 +366,10 @@ read-only. Each configuration passed 23 of 23 tests. The expanded
 `fastdb_background_flush` case waits for the worker's completed sealed
 sequence, triggers compaction with an L0 threshold of two, checks one L0 and
 one L1 table after the single automatic pass, then reads the same values after
-reopen. The existing shutdown fixture still checks close during flush output
-construction. Direct close during queued/running compaction is not yet tested.
+reopen. The existing shutdown fixture checks close during flush output
+construction. At V047, direct close during queued/running compaction had not
+yet been tested; V050 adds a gated close during an active detached merge.
+Queued-before-start cancellation still lacks a dedicated deterministic test.
 TSan was not rerun because B004 remains active; this result is not a
 race-detector result.
 
@@ -377,3 +379,39 @@ concurrency-labeled suites passed 20 consecutive repetitions.
 
 V049 reran the full GCC Debug build and CTest after a final guard adjustment
 in the new fixture. All 23 tests passed.
+
+## Concurrent L0 publication during background compaction
+
+V050 ran the full native matrix from a disposable Linux container with the
+source tree mounted read-only. GCC 12.2 Debug, Clang 14 Release, and GCC
+ASan/UBSan/LSan each configured and built with the project CMake files, then
+passed all 23 CTest cases. The expanded background fixture gates the worker
+after it releases the database mutex, publishes a new L0 table while the
+merge is detached, and checks catalog/data after close and reopen. It also
+injects output EIO, checks that source tables remain authoritative, retries
+maintenance, and verifies recovery after reopen. The test exercises the
+close path while an active background merge drains. It does not separately
+gate cancellation while a compaction is queued but has not started.
+
+V051 ran
+`ctest --test-dir /tmp/p36-repeat -L concurrency --repeat until-fail:20 --output-on-failure`.
+All three concurrency-labeled suites passed 20 consecutive repetitions
+(60 suite executions total).
+
+V052 ran Clang static analysis over `src/core/*.c`, `src/storage/*.c`, and
+`cli/*.c` with `-std=c17`, the POSIX and 64-bit-offset defines, and project
+include paths (`include`, `src`, `src/core`, `src/storage`). It exited 0 with
+no diagnostics.
+
+V053 built `fastdb-native:local` with
+`docker build --progress=plain -t fastdb-native:local .`. The image build's
+Release CTest passed 23/23. A temporary named volume was shared by separate
+containers: one performed `put 6b 76616c7565`, `flush`, and `compact`; the
+next returned `VALUE 1 76616c7565` for `get 6b`. The image ran as UID/GID
+10001. The volume was removed after the check. Image ID:
+`sha256:5599f0b9eb81ca2d942324a3eebd525b17468954d78c1d2b889fc6b2184ab77c`
+(linux/amd64).
+
+These tests establish the exercised interleavings and process-level restart
+behavior only. They do not establish TSan, physical power-loss behavior,
+quota-aware free-space reservation, or release-scale resource bounds.

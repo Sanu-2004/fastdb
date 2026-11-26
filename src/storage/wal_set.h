@@ -14,6 +14,9 @@ typedef struct FDBWalSet {
     size_t pinned_read_bytes;
     bool reclaim_pending;
     bool poisoned;
+    bool compaction_outputs_reserved;
+    uint64_t compaction_output_begin;
+    uint64_t compaction_output_end;
 } FDBWalSet;
 
 /* covered_sequence is the verified sequence covered by durable tables or a checkpoint. */

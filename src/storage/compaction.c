@@ -9,8 +9,10 @@
 typedef struct Build {
     FDBWalSet *set;
     const FDBCompactionPlan *plan;
+    const uint64_t *input_ids;
     FDBManifestLoad candidate;
     size_t key_bytes;
+    uint64_t output_begin;
     uint64_t next_output_id;
     uint64_t end_output_id;
 } Build;
@@ -52,13 +54,53 @@ static FastDBStatus finished(void *context, const char *temporary_name,
     });
 }
 
-static bool selected(size_t index, const size_t *inputs, size_t count)
+static bool selected(uint64_t id, const uint64_t *input_ids, size_t count)
 {
     for (size_t i = 0; i < count; ++i) {
-        if (inputs[i] == index)
+        if (input_ids[i] == id)
             return true;
     }
     return false;
+}
+
+static const FDBManifestEntry *find_input(const FDBManifest *manifest, uint64_t id)
+{
+    for (size_t i = 0; i < manifest->count; ++i) {
+        if (manifest->entries[i].id == id && manifest->entries[i].kind == FDB_FILE_SSTABLE)
+            return &manifest->entries[i];
+    }
+    return NULL;
+}
+
+static bool ranges_overlap(FastDBSlice left_min, FastDBSlice left_max,
+                           FastDBSlice right_min, FastDBSlice right_max)
+{
+    return fdb_compare(left_min, right_max) <= 0 && fdb_compare(right_min, left_max) <= 0;
+}
+
+static FastDBStatus validate_inputs(const Build *build)
+{
+    const FDBManifest *manifest = &build->set->catalog.view;
+    const FDBManifestEntry *source = find_input(manifest, build->input_ids[0]);
+    if (source == NULL || source->level != build->plan->source_level)
+        return FASTDB_CONFLICT;
+    FastDBSlice output_max = build->plan->split_after.size == 0 ? source->max_key :
+                             build->plan->split_after;
+    for (size_t i = 1; i < build->plan->count; ++i) {
+        const FDBManifestEntry *entry = find_input(manifest, build->input_ids[i]);
+        if (entry == NULL || entry->level != build->plan->destination_level ||
+            !ranges_overlap(source->min_key, output_max, entry->min_key, entry->max_key))
+            return FASTDB_CONFLICT;
+    }
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const FDBManifestEntry *entry = &manifest->entries[i];
+        if (entry->kind == FDB_FILE_SSTABLE &&
+            entry->level == build->plan->destination_level &&
+            ranges_overlap(source->min_key, output_max, entry->min_key, entry->max_key) &&
+            !selected(entry->id, build->input_ids, build->plan->count))
+            return FASTDB_CONFLICT;
+    }
+    return FASTDB_OK;
 }
 
 static FastDBStatus allocate_candidate(Build *build)
@@ -78,11 +120,11 @@ static FastDBStatus allocate_candidate(Build *build)
     return FASTDB_OK;
 }
 
-static FastDBStatus copy_retained(Build *build, const size_t *inputs)
+static FastDBStatus copy_retained(Build *build)
 {
     FDBWalSet *set = build->set;
     for (size_t i = 0; i < set->catalog.view.count; ++i) {
-        if (selected(i, inputs, build->plan->count))
+        if (selected(set->catalog.view.entries[i].id, build->input_ids, build->plan->count))
             continue;
         FastDBStatus status = add_entry(build, set->catalog.view.entries[i]);
         if (status != FASTDB_OK)
@@ -91,7 +133,7 @@ static FastDBStatus copy_retained(Build *build, const size_t *inputs)
     return FASTDB_OK;
 }
 
-static FastDBStatus write_outputs(Build *build, const size_t *inputs, FDBMergeLimits limits,
+static FastDBStatus write_outputs(Build *build, FDBMergeLimits limits,
                                    pthread_mutex_t *mutex)
 {
     FDBWalSet *set = build->set;
@@ -122,27 +164,41 @@ static FastDBStatus write_outputs(Build *build, const size_t *inputs, FDBMergeLi
     }
     FastDBStatus status = fdb_manifest_reserve_files(set->dir, &set->catalog_limits, &set->catalog.view,
                                                      limits.max_outputs, &build->next_output_id);
+    build->output_begin = build->next_output_id;
     build->end_output_id = set->catalog.view.next_file_id;
     for (size_t i = 0; status == FASTDB_OK && i < count; ++i) {
+        const FDBManifestEntry *entry = find_input(&set->catalog.view, build->input_ids[i]);
+        if (entry == NULL) {
+            status = FASTDB_CONFLICT;
+            break;
+        }
         FDBSSTReader *reader;
-        status = fdb_catalog_open_table(set->dir, &set->catalog.view.entries[inputs[i]],
-                                         &limits.output_table, &reader);
+        status = fdb_catalog_open_table(set->dir, entry, &limits.output_table, &reader);
         readers[i] = reader;
     }
     if (status == FASTDB_OK) {
         const FDBMergeOutput output = {take_output_id, finished, build};
-        if (mutex != NULL)
+        if (mutex != NULL) {
+            set->compaction_outputs_reserved = true;
+            set->compaction_output_begin = build->output_begin;
+            set->compaction_output_end = build->end_output_id;
             pthread_mutex_unlock(mutex);
+        }
         status = fdb_sst_merge_split(set->dir, readers, count, &limits, &output);
-        if (mutex != NULL)
+        if (mutex != NULL) {
             pthread_mutex_lock(mutex);
+            set->compaction_outputs_reserved = false;
+            set->compaction_output_begin = 0;
+            set->compaction_output_end = 0;
+        }
         if (set->poisoned)
             status = FASTDB_COMMIT_UNCERTAIN;
         for (size_t i = 0; status == FASTDB_OK && i < count; ++i) {
-            if (inputs[i] >= set->catalog.view.count ||
-                set->catalog.view.entries[inputs[i]].id != fdb_sst_reader_properties(readers[i])->id)
+            if (build->input_ids[i] != fdb_sst_reader_properties(readers[i])->id)
                 status = FASTDB_CONFLICT;
         }
+        if (status == FASTDB_OK && mutex != NULL)
+            status = validate_inputs(build);
     }
     for (size_t i = 0; i < count; ++i) {
         FastDBStatus closed = fdb_sst_reader_close((FDBSSTReader *)readers[i]);
@@ -203,18 +259,18 @@ static FastDBStatus publish(Build *build, uint32_t levels, size_t outputs)
 }
 
 FastDBStatus fdb_compact_once(FDBWalSet *set, const FDBCompactionPolicy *policy,
-                               const FDBCompactionPlan *plan, const size_t *inputs,
+                               const FDBCompactionPlan *plan, const uint64_t *input_ids,
                                const FDBMergeLimits *limits, pthread_mutex_t *mutex)
 {
     if (set->poisoned)
         return FASTDB_COMMIT_UNCERTAIN;
-    Build build = {.set = set, .plan = plan};
+    Build build = {.set = set, .plan = plan, .input_ids = input_ids};
     FastDBStatus status = allocate_candidate(&build);
     if (status == FASTDB_OK)
-        status = write_outputs(&build, inputs, *limits, mutex);
+        status = write_outputs(&build, *limits, mutex);
     size_t outputs = build.candidate.view.count;
     if (status == FASTDB_OK)
-        status = copy_retained(&build, inputs);
+        status = copy_retained(&build);
     if (status == FASTDB_OK)
         status = publish(&build, policy->levels, outputs);
     if (status == FASTDB_COMMIT_UNCERTAIN)

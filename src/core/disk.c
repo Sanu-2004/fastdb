@@ -23,6 +23,7 @@ struct FDBDisk {
     size_t writer_bytes;
     size_t table_workspace;
     bool compaction_cleanup_needed;
+    bool compaction_flush_allowed;
 };
 
 static const FastDBPersistentOptions defaults = {
@@ -416,7 +417,7 @@ FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
 {
     if (!fdb_disk_has_tables(disk))
         return FASTDB_UNSUPPORTED;
-    if (disk->compaction_bytes != 0)
+    if (disk->compaction_bytes != 0 && !disk->compaction_flush_allowed)
         return FASTDB_BUSY;
     FastDBStatus status = fdb_storage_prepare_maintenance(&disk->log);
     if (status == FASTDB_OK)
@@ -461,7 +462,8 @@ FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushO
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
-FastDBStatus fdb_disk_compact(FastDB *db, bool manual, const FastDBRange *range)
+FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
+                               const FastDBRange *range)
 {
     FDBDisk *disk = db->disk;
     if (!fdb_disk_has_tables(disk) || !disk->compaction.enabled)
@@ -501,10 +503,21 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, const FastDBRange *range)
     if (policy.max_inputs < 2)
         policy.max_inputs = 2;
     size_t inline_inputs[2];
+    uint64_t inline_input_ids[2];
     size_t input_indexes = policy.max_inputs * sizeof(size_t);
+    size_t input_id_bytes = policy.max_inputs * sizeof(uint64_t);
+    size_t selection_bytes;
+    if (!fdb_add_size(input_indexes, input_id_bytes, &selection_bytes))
+        return FASTDB_LIMIT_EXCEEDED;
     size_t *inputs = policy.max_inputs == 2 ? inline_inputs : malloc(input_indexes);
-    if (inputs == NULL)
+    uint64_t *input_ids = policy.max_inputs == 2 ? inline_input_ids : malloc(input_id_bytes);
+    if (inputs == NULL || input_ids == NULL) {
+        if (inputs != inline_inputs)
+            free(inputs);
+        if (input_ids != inline_input_ids)
+            free(input_ids);
         return FASTDB_OUT_OF_MEMORY;
+    }
     FDBMergeLimits limits = {
         .output_table = disk->table,
         .max_inputs = policy.max_inputs,
@@ -524,23 +537,27 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, const FastDBRange *range)
         available = headroom + disk->table_workspace;
         if (cap != 0 && cap < available)
             available = cap;
-        if (input_indexes > available || disk->writer_bytes > available - input_indexes ||
-            plan.count > (available - input_indexes - disk->writer_bytes) / input_bytes) {
+        if (selection_bytes > available || disk->writer_bytes > available - selection_bytes ||
+            plan.count > (available - selection_bytes - disk->writer_bytes) / input_bytes) {
             status = FASTDB_LIMIT_EXCEEDED;
             break;
         }
-        limits.max_working_bytes = available - input_indexes;
+        for (size_t i = 0; i < plan.count; ++i)
+            input_ids[i] = disk->log.catalog.view.entries[inputs[i]].id;
+        limits.max_working_bytes = available - selection_bytes;
         size_t catalogs, charge = disk->writer_bytes + plan.count * input_bytes;
         pthread_mutex_t *mutex = NULL;
-        if (manual && catalog_budget(&disk->manifest, &catalogs) &&
+        if ((manual || background) && catalog_budget(&disk->manifest, &catalogs) &&
             fdb_add_size(charge, catalogs / 3, &charge) &&
-            fdb_add_size(charge, input_indexes, &charge) &&
+            fdb_add_size(charge, selection_bytes, &charge) &&
             fdb_add_size(charge, plan.split_after.size, &charge) && charge <= headroom) {
             disk->compaction_bytes = charge;
+            disk->compaction_flush_allowed = background;
             mutex = &db->mutex;
         }
-        status = fdb_compact_once(&disk->log, &policy, &plan, inputs, &limits, mutex);
+        status = fdb_compact_once(&disk->log, &policy, &plan, input_ids, &limits, mutex);
         disk->compaction_bytes = 0;
+        disk->compaction_flush_allowed = false;
         if (status != FASTDB_OK) {
             disk->compaction_cleanup_needed = true;
             break;
@@ -548,6 +565,8 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, const FastDBRange *range)
     }
     if (inputs != inline_inputs)
         free(inputs);
+    if (input_ids != inline_input_ids)
+        free(input_ids);
     return status == FASTDB_BUSY && !manual ? FASTDB_OK : status;
 }
 

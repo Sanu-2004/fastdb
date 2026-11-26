@@ -139,6 +139,12 @@ static FastDBStatus reclaim_file(void *context, const char *name)
     uint64_t generation;
     bool manifest_temp = fdb_manifest_temp_generation(name, &generation) &&
                          generation - 1 <= manifest->generation;
+    bool compaction_output = reclaim->set->compaction_outputs_reserved && file.id != 0 &&
+                             file.kind == FDB_FILE_SSTABLE && file.temporary &&
+                             file.id >= reclaim->set->compaction_output_begin &&
+                             file.id < reclaim->set->compaction_output_end;
+    if (compaction_output)
+        return FASTDB_OK;
     if (!manifest_temp &&
         (file.id == 0 || file.id >= manifest->next_file_id || referenced(manifest, file)))
         return FASTDB_OK;

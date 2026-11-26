@@ -48,7 +48,8 @@ FastDBStatus fdb_disk_flush_reserve(FDBDisk *disk, FDBFlushOutput *output);
 FastDBStatus fdb_disk_flush_build(const FDBDisk *disk, const FDBTree *tree, FDBFlushOutput *output);
 FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushOutput *output);
 size_t fdb_disk_compaction_bytes(const FDBDisk *disk);
-FastDBStatus fdb_disk_compact(FastDB *db, bool manual, const FastDBRange *range);
+FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
+                               const FastDBRange *range);
 FastDBStatus fdb_disk_checkpoint(FDBDisk *disk, FDBTree *tree);
 FastDBStatus fdb_disk_maybe_checkpoint(FDBDisk *disk, FDBTree *tree, size_t frame_bytes);
 
