@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `f69cd49` / `main`. V050–V053 verify P3.6; V054–V057 verify successive P3.7 slices.
+**Last verified base commit / branch:** `c008a31` / `main`. V050–V053 verify P3.6; V054–V058 verify successive P3.7 slices.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -460,7 +460,7 @@ These are deliberate boundaries, not completed features:
 - Increased the compaction reserve to eight descriptors and LSM minimum from 8 to 10. The eight slots now account for directory, lock, active WAL, compaction output, foreground flush output, one pinned read, replacement WAL, and manifest publication. Fan-in remains at least two at the new minimum. Updated API/config documentation and regression limits.
 - Focused `fastdb_background_flush` and `fastdb_lsm_fault` each passed 1/1. GCC Debug, Clang Release and GCC ASan/UBSan/LSan full CTest each passed 23/23. Docker GCC 12.2 Release build/CTest passed 23/23. Commands/results are V058 and [native verification](docs/verification/NATIVE_CHECKPOINT.md). The initial FD test failure is recorded above; no failures remain.
 - `max_open_files` remains a compaction-reader descriptor budget, not a strict cap across all open/recovery paths or a process-wide cap. P3.7 remains IN_PROGRESS; next review the queue/memory accounting paths and add deterministic evidence for an unverified boundary. TSan remains blocked by B004.
-- Commit/push and final tree state to be recorded after publication.
+- Committed and pushed as `c008a31` (`Correct overlapping compaction FD budget`) to `origin/main`.
 
 ## 9. Current handoff
 
@@ -468,8 +468,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by auditing and testing queue/memory accounting and background-work budgets. `src/core/engine.c` is the starting point for charged worker state, immutable-tree occupancy, `write_headroom`, and commit admission. Identify an untested saturation or retry condition and add deterministic coverage. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Review `fdb_memory_bytes`, `write_headroom`, `prepare_nodes`, and `flush_worker` alongside `docs/CONFIGURATION.md`; reproduce a concrete missing boundary in a native test, then run GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker Release CTest using [native verification](docs/verification/NATIVE_CHECKPOINT.md).
-- **Last verified good checkpoint:** Start `2de7e5c`; V058 working tree passed focused background flush and LSM-fault tests (1/1 each), GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
-- **Working-tree state:** Implementation and documentation changes from this session await commit/push. No owner data was opened in tests.
+- **Last verified good checkpoint:** P3.7 commit `c008a31` on `origin/main`; V058 passed focused background flush and LSM-fault tests (1/1 each), GCC Debug, Clang Release, GCC ASan/UBSan/LSan and Docker GCC Release (23/23 each). TSan remains blocked as B004.
+- **Working-tree state:** Clean at pushed commit `c008a31` on `origin/main`. No owner data was opened in tests.
 - **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.7 can proceed locally with normal builds and other sanitizers.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Close now has a regression proving it reports an unretried background compaction error. `max_open_files` reserves eight slots for compaction fan-in but is not a strict cap during every open/recovery path or process-wide across database instances. Disk headroom is advisory and checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Queue/memory/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
