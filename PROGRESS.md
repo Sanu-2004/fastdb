@@ -5,7 +5,7 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `1fcf0f4` / `main`. V050–V053 verify P3.6; V054–V063 verify successive P3.7 slices.
+**Last verified base commit / branch:** `7210a36` / `main`. V050–V053 verify P3.6; V054–V063 verify successive P3.7 slices.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
 **Next task:** P3.7 — implement configurable disk headroom checks and safe backpressure.
 
@@ -508,7 +508,7 @@ These are deliberate boundaries, not completed features:
 - Rebuilt GCC TSan binaries in Docker with seccomp unconfined and ran all three concurrency-labeled suites under `setarch x86_64 -R` with `--repeat until-fail:20`.
 - V063 passed 3 suites × 20 repetitions = 60 suite runs with no TSan diagnostics. Build succeeded. Exact command and scope are in [native verification](docs/verification/NATIVE_CHECKPOINT.md).
 - B004 remains resolved for this local setup. P3.7 memory saturation is still the next implementation task; no task status was advanced. `git diff --check` passed before publication.
-- Committed and pushed as `PENDING` (fill with actual commit after push); no code changed. Tests used disposable directories.
+- Committed and pushed as `7210a36` (`Record repeated TSan concurrency verification`) to `origin/main`; post-push working tree was clean. No code changed. Tests used disposable directories.
 
 ## 9. Current handoff
 
@@ -516,8 +516,8 @@ These are deliberate boundaries, not completed features:
 - **Next task ID:** P3.7.
 - **Next action:** Continue P3.7 by testing actual aggregate active+frozen memory saturation, using V061 only as accounting evidence, not proof of saturation. Do not start P3.8 until P3.7 is verified.
 - **Next commands:** Derive minimal valid LSM limits and threshold from `fdb_disk_validate` in `src/core/disk.c`; gate worker I/O in `tests/native/background_flush.c`, fill active memory to rejection, assert exact budget and no partial commit, release/publish frozen tree, and retry. Then run all applicable compiler/sanitizer/Docker checks for the final code.
-- **Last verified good checkpoint:** P3.7 commit `1fcf0f4` on `origin/main`; V060 passed focused backpressure (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker GCC Release (23/23 each). V061 GCC Debug focused/full passed 1/1 and 23/23. V062 TSan concurrency passed 3/3; V063 repeated those suites 20 times each (60/60) using the documented workaround.
-- **Working-tree state:** V063 documentation is uncommitted; no code changed this session. Tests used disposable data directories; no owner data was opened.
+- **Last verified good checkpoint:** P3.7 commit `7210a36` on `origin/main`; V060 passed focused backpressure (1/1), GCC Debug, Clang Release, GCC ASan/UBSan/LSan, and Docker GCC Release (23/23 each). V061 GCC Debug focused/full passed 1/1 and 23/23. V062 TSan concurrency passed 3/3; V063 repeated those suites 20 times each (60/60) using the documented workaround.
+- **Working-tree state:** Clean at pushed commit `7210a36` on `origin/main`. No code changed this session. Tests used disposable data directories; no owner data was opened.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. It starts after L0 flush and excludes other SSTable maintenance while merging; a foreground L0 flush may publish concurrently. Queued-before-start cancellation lacks its own deterministic regression. Close now has a regression proving it reports an unretried background compaction error. `max_open_files` reserves eight slots for compaction fan-in but is not a strict cap during every open/recovery path or process-wide across database instances. Disk headroom is advisory and checks estimated WAL/table bytes; quota awareness and concurrent external consumption are not guaranteed. Queue/memory/backpressure accounting, size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
