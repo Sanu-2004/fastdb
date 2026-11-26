@@ -616,3 +616,22 @@ ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37b-asan --output-on-failure
 `docker build -t fastdb-native:local .` succeeded. Its GCC 12.2 Release build
 and CTest passed 23/23. Docker emitted only the known warning that `git.exe`
 was unavailable for build metadata. TSan was not run due to B004.
+
+## Aggregate active/frozen memory accounting assertion
+
+V061 strengthens `tests/native/background_flush.c` during the gated worker flush.
+While the immutable and active trees both hold records, it checks exact reported
+charged bytes against the handle, active tree, frozen tree, iterator allocation,
+and reserved disk workspace. The existing budget assertion also requires total
+charged bytes to remain at or below 128 KiB. This is an accounting consistency
+check, not a proof of process RSS or an actual max-budget saturation test.
+
+Using `fastdb-local-toolchain:bookworm` with the repository mounted read-only:
+GCC Debug configure/build in `/tmp/p37mem-gcc` succeeded; focused
+`fastdb_background_flush` passed 1/1 and full CTest passed 23/23. Two initial
+compile attempts failed while constructing the internal accounting expression:
+one lacked the `disk.h` declaration and the next could not resolve that header's
+storage-relative include. The test was simplified to the active/frozen/workspace
+components directly observable through its existing headers; the final build
+and both test runs passed. Clang, sanitizers, Docker, and TSan were not run on
+this V061 source change. TSan remains blocked by B004.

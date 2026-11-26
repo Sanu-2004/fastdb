@@ -138,6 +138,9 @@ static FastDBBatch *update_while_frozen(FastDB *db)
     FastDBStats stats;
     OK(fastdb_stats(db, &stats));
     CHECK(stats.record_count == 7 && stats.revision == 7 && stats.memory_bytes <= 128 * 1024);
+    size_t accounted = sizeof(*db) + db->tree.bytes + db->flush->frozen.bytes +
+                       db->iterator_bytes + db->disk_budget;
+    CHECK(stats.memory_bytes == accounted);
     return batch;
 }
 
