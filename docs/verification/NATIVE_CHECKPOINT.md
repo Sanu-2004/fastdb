@@ -635,3 +635,27 @@ storage-relative include. The test was simplified to the active/frozen/workspace
 components directly observable through its existing headers; the final build
 and both test runs passed. Clang, sanitizers, Docker, and TSan were not run on
 this V061 source change. TSan remains blocked by B004.
+
+## ThreadSanitizer Docker ASLR workaround (V062)
+
+The default Docker invocation reproduced `FATAL: ThreadSanitizer: unexpected
+memory mapping`. `setarch x86_64 -R` was denied with Docker's default seccomp
+profile (`Operation not permitted`). Rebuilding/running in a disposable
+container with `--security-opt seccomp=unconfined` allowed the process
+personality change; with ASLR disabled for the process, the TSan test ran
+successfully. No project source or compiler flags were changed to obtain this
+result.
+
+Exact command (GCC 12.2, read-only source mount):
+
+```sh
+docker run --rm --network none --security-opt seccomp=unconfined \
+  -v D:/codex/fastdb:/repo:ro --workdir /repo fastdb-local-toolchain:bookworm \
+  sh -lc 'set -e; CC=gcc cmake -S /repo -B /tmp/tsan-p37 -DCMAKE_BUILD_TYPE=Debug -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie; cmake --build /tmp/tsan-p37 --parallel; setarch x86_64 -R ctest --test-dir /tmp/tsan-p37 -L concurrency --output-on-failure'
+```
+
+Result: build passed; `fastdb_concurrency`, `fastdb_background_flush`, and
+`fastdb_read_view` passed under TSan, 3/3. Initial baseline behavior and the
+seccomp restriction were also reproduced. This resolves the local runtime
+blocker for this Linux x86-64 Docker setup. It does not constitute a full TSan
+run of every non-concurrency test or coverage on other hosts/platforms.
