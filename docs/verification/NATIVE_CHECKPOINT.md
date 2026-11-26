@@ -788,3 +788,51 @@ CC=gcc cmake -S /repo -B /tmp/p37-fd-tsan -DCMAKE_BUILD_TYPE=Debug \
 cmake --build /tmp/p37-fd-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p37-fd-tsan -L concurrency --output-on-failure
 ```
+
+## P3.7 completion: LSM descriptor peaks (V066)
+
+The recovery test reopens a table plus sealed and active WALs with an orphan
+temporary SSTable. The filesystem callback samples four database descriptors
+with the directory stream open during cleanup. Reads find the table and all
+WAL records at their original revisions. Close returns to the FD baseline.
+
+The overlap test seeds an L1 table and two L0 tables so automatic compaction
+holds two inputs and one output open. A point read pauses after opening its
+table. Foreground puts then rotate the WAL and flush a fresh L0. The probe
+samples at least nine and at most ten descriptors. While the read is pinned,
+a second flush returns BUSY because reclamation is pending. Close drains the
+compaction after the reader is released, and reopen verifies the newest
+values. An earlier fixture selected a merge with one input and failed the
+overlap lower-bound assertion. The two-input fixture passed both focused
+tests 1/1 each.
+
+Commands ran with the V064 Docker toolchain and read-only source mount:
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-close -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-close --parallel
+ctest --test-dir /tmp/p37-close -R '^fastdb_background_flush$' --output-on-failure
+ctest --test-dir /tmp/p37-close -R '^fastdb_lsm_fault$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p37-done-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p37-done-gcc --parallel
+ctest --test-dir /tmp/p37-done-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p37-done-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p37-done-clang --parallel
+ctest --test-dir /tmp/p37-done-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p37-done-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-done-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p37-done-asan --output-on-failure
+```
+
+Each full suite passed 23/23. `docker build -t fastdb-native:local .`
+passed its Release tests 23/23. With the V062 TSan setup, the three concurrency
+tests passed five repetitions each (15 executions):
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p37-done-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p37-done-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p37-done-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```

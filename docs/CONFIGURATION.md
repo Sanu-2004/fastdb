@@ -57,9 +57,11 @@ flush writer, one pinned point read, a replacement WAL during rotation, and a
 manifest file during catalog publication. The effective compaction reader
 fan-in is `min(max_merge_inputs, max_open_files - 8)`. Thus the minimum LSM
 budget of 10 permits a two-reader merge. Insufficient settings are rejected
-at option validation. This budgets compaction reader fan-in; it is not a hard
-cap on all FastDB descriptors during open/recovery or across multiple database
-instances, and it does not constrain unrelated process files.
+at option validation. During recovery, the directory and lock remain open
+while catalog validation and WAL replay open one file at a time. Orphan
+cleanup can hold a directory stream alongside the active WAL. The budget is
+per database. Other database handles and unrelated process descriptors are
+outside this accounting.
 
 When `min_free_bytes` is nonzero, persistent writes query available filesystem
 space before appending the WAL frame; if the append requires WAL rotation, the

@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-26  
-**Last verified base commit / branch:** `0ab2d29` / `main`. V064 verifies memory admission and compaction, and V065 verifies the persistent memory descriptor change in this checkpoint.
+**Last verified base commit / branch:** `4d3f6e8` / `main`. V066 verifies the P3.7 completion checkpoint.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
-**Next task:** P3.7 — finish resource admission and backpressure verification.
+**Next task:** P3.8 — native snapshots, retained history and coherent merged scans.
 
 ## 1. How to use this file
 
@@ -100,7 +100,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P3.4 | Manual range/full compaction and disabled mode; atomic manifest publication and safe reclamation. | DONE | V026–V028. Native and CLI maintenance, active WAL continuity, bounded admission, old input retention on failure, reopen, and nine compaction process-kill cases. Full maintenance promotes eligible tables to the last level and retains all history. |
 | P3.5 | Coherent read-view capture, pinned versions/files, active-to-immutable rotation and background flush worker(s). | DONE | V031, V036–V037. Optional single flush worker, bounded pinned GET/exists, coherent frozen and active reads, deferred reclamation, worker resumption, and shutdown. [ADR 0006](docs/adr/0006-pinned-sstable-reads.md). |
 | P3.6 | Compaction worker(s), conflict reservations, commit revalidation, scheduling, safe failure/cancel/shutdown. | DONE | V050–V053: compiler/sanitizer matrix, 20x concurrency repeats, analyzer, Docker build/restart. Stable IDs and destination overlap closure are revalidated after detached merge; concurrent L0 flush is retained, temporary output IDs are protected, worker failure preserves inputs and retry/reopen succeeds; close drains active worker merge. Queued-before-start cancellation has code coverage by inspection but no separately gated regression. |
-| P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | IN_PROGRESS | V054–V060 cover disk-space preflight, compaction reader descriptor budgeting, background errors and atomic queue backpressure. V064 verifies active plus frozen memory saturation and corrects compaction workspace admission. V065 measures five descriptors during persistent memory WAL rotation and corrects its minimum from four to five. GCC Debug, Clang Release, ASan/UBSan with leak detection and Docker Release each passed 23/23. TSan concurrency passed 3/3. Remaining: measure LSM recovery and the pinned-read/compaction/flush overlap at the minimum descriptor budget. Disk-space estimates remain advisory. |
+| P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | DONE | V054–V060 cover low-space preflight, bounded worker queues, safe shutdown errors and atomic backpressure. V064 verifies active plus frozen memory saturation and compaction workspace admission. V065 measures the persistent memory rotation peak of five FDs. V066 verifies the LSM floor of ten across recovery and a pinned read, two-reader compaction, WAL rotation and foreground flush. GCC Debug, Clang Release, ASan/UBSan with leak detection and Docker Release each passed 23/23. TSan passed 15 executions across three concurrency tests. Bounds are engine-accounted and disk preflight is advisory. Release-scale RSS measurement is tracked in P3.11 and P8.3. |
 | P3.8 | Native snapshots and history retention across memtable and disk; atomic batch visibility; coherent merged scans. | TODO | — |
 | P3.9 | TTL with controlled clock, expiration masking, physical reclamation and explicitly enabled memory eviction policies. | TODO | — |
 | P3.10 | Safe obsolete-version/tombstone collection with proof, active snapshot checks and no data resurrection. Depends P3.8/P3.9. | TODO | — |
@@ -205,7 +205,7 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | — |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V065 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V066 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -288,6 +288,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V063 | 2026-11-26 / P3.7 TSan concurrency repeat, source at `1fcf0f4` | GCC 12.2 Debug TSan build in Docker with `--security-opt seccomp=unconfined`; `setarch x86_64 -R ctest --test-dir /tmp/tsan-repeat -L concurrency --repeat until-fail:20 --output-on-failure`. Exact command in [native verification](docs/verification/NATIVE_CHECKPOINT.md). | PASS | All three concurrency suites passed 20 repetitions each (60 suite runs total) without TSan diagnostics. Same Linux x86-64 host/runtime; this does not establish cross-platform behavior. |
 | V064 | 2026-11-26 / P3.7 working tree based on `19b29c1` | Docker GCC Debug repro and focused tests, full GCC Debug/Clang Release/ASan+UBSan+LSan, GCC TSan concurrency and `docker build -t fastdb-native:local .`. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS after fix | Original compaction returned LIMIT_EXCEEDED one byte below the workspace for three inputs. Including selection arrays in fan-in lets two-input stages succeed and preserves values and tombstones after reopen. Active plus frozen saturation rejects a write and batch without advancing the revision, then admits the same batch after publication. Both focused tests passed 1/1. Full suites and Docker passed 23/23 each. TSan passed 3/3. |
 | V065 | 2026-11-26 / P3.7 working tree based on `0ab2d29` | Docker GCC Debug repro and focused `fastdb_lsm_fault`, full GCC Debug/Clang Release/ASan+UBSan+LSan, GCC TSan concurrency and Docker Release build. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS after fix | Persistent memory rotation reached five owned descriptors. Original validator accepted four. Updated validation rejects three and four. With five, rotation, checkpoint, WAL replay and reopen pass and close returns to baseline. Focused test 1/1, full profiles and Docker 23/23 each, TSan 3/3. |
+| V066 | 2026-11-26 / P3.7 completion based on `4d3f6e8` | GCC Debug, Clang Release, ASan/UBSan/LSan and TSan Docker container builds plus Docker Release image build. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | LSM recovery samples four descriptors with table validation, two WALs and orphan cleanup. Gated read, two-reader compaction, WAL rotation and foreground flush sample 9–10 under budget 10, preserve revisions across close and reopen, and test BUSY while reclamation waits on the pinned read. Full GCC, Clang, ASan/UBSan/LSan and Docker passed 23/23 each. TSan concurrency 3 suites × 5 repeats. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -526,15 +527,21 @@ These are deliberate boundaries, not completed features:
 - V065 passed focused CTest 1/1, GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release 23/23 each, and TSan concurrency 3/3. Fixture verifies checkpoint values, a WAL replay value and descriptor cleanup. The first fixture iteration rotated one write early and was corrected before the reproduction.
 - P3.7 remains IN_PROGRESS. Continue with LSM descriptor measurement at the paths listed below.
 
+### Session 020 — 2026-11-26 — Finish P3.7 resource admission
+
+- Started at pushed `4d3f6e8` on clean `main`. Added an LSM recovery probe at the configured minimum and extended the gated worker test to hold an actual read FD open during a two-input compaction and foreground WAL rotation and flush.
+- The first focused run used a one-input compaction and fell below the intended overlap lower bound. The final fixture seeds an overlapping L1 input and a second L0 to force the two-reader plan. Both focused suites passed and the final P3.7 matrix passed in V066.
+- Marked P3.7 DONE with V054–V066. Engine-accounted limits and release stress measurements have separate scope. Continue with P3.8.
+
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
-- **Next task ID:** P3.7.
-- **Next action:** Measure the LSM descriptor peak at the validated minimum of 10 in open/recovery and while a pinned read, a detached compaction and a foreground flush overlap. V065 covers the persistent memory floor.
-- **Next commands:** In `tests/native/lsm_fault.c`, reuse `DescriptorProbe` when reopening LSM with sealed and active WALs and an obsolete file to exercise `fdb_lsm_recover` and `fdb_dir_visit`. In `tests/native/background_flush.c`, collect FD samples before the worker-only gate checks so foreground operations count, then gate a pinned read after its table opens during the existing compaction/flush overlap. Run `ctest -R ^fastdb_background_flush$` and `ctest -R ^fastdb_lsm_fault$` separately. Reproduce any overrun before changing the reserve.
-- **Last verified good checkpoint:** V065, source changes in this checkpoint based on `0ab2d29` on `main`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records regression, matrix and TSan results for V064 and V065.
-- **Working-tree state:** The V065 checkpoint contains the descriptor validation, public header, probe tests and documentation. Use `git status --short --branch` to confirm state at resume.
+- **Next task ID:** P3.8.
+- **Next action:** Implement bounded immutable snapshot capture and point reads in the two memory modes before extending snapshots to the LSM catalog and merged scans.
+- **Next commands:** Review `src/core/engine.h`, accounting and close in `src/core/engine.c`, and `include/fastdb/fastdb.h`. Test capture across a batch and checkpoint, admission under tight headroom, and allocation rollback.
+- **Last verified good checkpoint:** V066 P3.7 completion based on `4d3f6e8`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records results.
+- **Working-tree state:** P3.7 completion checkpoint contains the two descriptor fixtures and documentation. Use `git status --short --branch` at resume.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
-- **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. Queued-before-start cancellation lacks its own deterministic regression. `max_open_files` reserves eight slots for LSM compaction fan-in. LSM recovery and the three-way overlap still need descriptor-budget evidence. Disk headroom uses estimated WAL/table bytes, and filesystem quotas and concurrent use can affect actual availability. Size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
+- **Critical limits:** Background compaction shares the optional flush worker and queues at most one job. Queued-before-start cancellation lacks its own deterministic regression. FD accounting covers the database handle, and disk headroom uses estimated output with filesystem quota and concurrent use caveats. Snapshot and LSM scan support, TTL writes, size-tiered compaction, history reclamation, power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <string.h>
 
 static size_t table_file_count(const char *path)
@@ -108,6 +109,52 @@ static void persistent_descriptor_peak(void)
     OK(fastdb_close(db));
     CHECK(process_fd_count() == probe.baseline);
 
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void lsm_recovery_descriptor_peak(void)
+{
+    char path[] = "/tmp/fastdb-lsm-recovery-fd.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBPersistentOptions settings = options->storage;
+    settings.max_open_files = 9;
+    STATUS(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings),
+           FASTDB_INVALID_ARGUMENT);
+    settings.max_open_files = 10;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &settings));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "table", 5, "durable", 7));
+    OK(fastdb_flush(db));
+    unsigned char value[120] = {42};
+    OK(fastdb_put(db, "a", 1, value, sizeof(value)));
+    OK(fastdb_put(db, "b", 1, value, sizeof(value)));
+    OK(fastdb_put(db, "c", 1, value, sizeof(value)));
+    OK(fastdb_close(db));
+
+    const char *orphan = ".sst-00000000000000000001.tmp";
+    DIR *directory = opendir(path);
+    CHECK(directory != NULL);
+    int fd = openat(dirfd(directory), orphan, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    CHECK(fd >= 0 && close(fd) == 0);
+    CHECK(closedir(directory) == 0);
+
+    DescriptorProbe probe = {.baseline = process_fd_count()};
+    const FDBFs fs = {count_descriptors, &probe};
+    OK(fdb_open_with_fs(options, &fs, &db));
+    CHECK(probe.peak == 4);
+    expect_value(db, (FastDBSlice){"table", 5}, (FastDBSlice){"durable", 7}, 1);
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){value, sizeof(value)}, 2);
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){value, sizeof(value)}, 3);
+    expect_value(db, (FastDBSlice){"c", 1}, (FastDBSlice){value, sizeof(value)}, 4);
+    OK(fastdb_close(db));
+    CHECK(process_fd_count() == probe.baseline);
+    directory = opendir(path);
+    CHECK(directory != NULL);
+    CHECK(faccessat(dirfd(directory), orphan, F_OK, 0) < 0 && errno == ENOENT);
+    CHECK(closedir(directory) == 0);
     fastdb_options_destroy(options);
     remove_disk_fixture(path);
 }
@@ -371,6 +418,7 @@ static void compaction_failure(FDBFsOp op, size_t countdown, FastDBStatus failur
 
 int main(void)
 {
+    lsm_recovery_descriptor_peak();
     persistent_descriptor_peak();
     descriptor_budget_validation();
     low_space_admission();

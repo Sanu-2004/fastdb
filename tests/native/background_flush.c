@@ -23,6 +23,9 @@ typedef struct Gate {
     int error;
     bool reached;
     bool released;
+    bool hold_reader;
+    bool reader_reached;
+    bool reader_released;
 } Gate;
 
 static const unsigned char old_value[120] = {1};
@@ -35,7 +38,22 @@ static FDBFsFault enter_gate(void *context, FDBFsOp operation, size_t size)
     (void)size;
     Gate *gate = context;
     bool foreground = pthread_equal(pthread_self(), gate->foreground);
-    if (operation != gate->operation)
+    if (gate->track_fds) {
+        CHECK(pthread_mutex_lock(&gate->mutex) == 0);
+        size_t open_files = process_fd_count();
+        CHECK(open_files >= gate->fd_baseline);
+        size_t database_files = open_files - gate->fd_baseline;
+        if (database_files > gate->fd_peak)
+            gate->fd_peak = database_files;
+        if (!foreground && operation == FDB_FS_READ && gate->hold_reader) {
+            gate->reader_reached = true;
+            CHECK(pthread_cond_broadcast(&gate->condition) == 0);
+            while (!gate->reader_released)
+                CHECK(pthread_cond_wait(&gate->condition, &gate->mutex) == 0);
+        }
+        CHECK(pthread_mutex_unlock(&gate->mutex) == 0);
+    }
+    if (foreground || operation != gate->operation)
         return (FDBFsFault){0};
     if (gate->compaction_only &&
         (gate->database == NULL || gate->database->flush == NULL ||
@@ -47,17 +65,6 @@ static FDBFsFault enter_gate(void *context, FDBFsOp operation, size_t size)
         gate->engine_mutex_available = true;
         CHECK(pthread_mutex_unlock(&gate->database->mutex) == 0);
     }
-    if (gate->track_fds) {
-        size_t open_files = process_fd_count();
-        CHECK(pthread_mutex_lock(&gate->mutex) == 0);
-        size_t database_files = open_files >= gate->fd_baseline ?
-                                3 + open_files - gate->fd_baseline : 0;
-        if (database_files > gate->fd_peak)
-            gate->fd_peak = database_files;
-        CHECK(pthread_mutex_unlock(&gate->mutex) == 0);
-    }
-    if (foreground)
-        return (FDBFsFault){0};
     CHECK(pthread_mutex_lock(&gate->mutex) == 0);
     int error = 0;
     if (gate->remaining != 0 && --gate->remaining == 0) {
@@ -425,6 +432,12 @@ static void worker_schedules_compaction_after_flush(void)
     remove_disk_fixture(path);
 }
 
+static void *read_compaction_input(void *arg)
+{
+    expect_value(arg, (FastDBSlice){"b", 1}, old_bytes, 2);
+    return NULL;
+}
+
 static void close_drains_background_compaction(void)
 {
     char path[] = "/tmp/fastdb-bg-compact-close.XXXXXXXX";
@@ -440,37 +453,62 @@ static void close_drains_background_compaction(void)
     Gate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
                  .foreground = pthread_self(), .operation = FDB_FS_WRITE};
     gate.track_fds = true;
+    gate.fd_baseline = process_fd_count();
     gate.fd_budget = options->storage.max_open_files;
     const FDBFs fs = {enter_gate, &gate};
     FastDB *db;
     OK(fdb_open_with_fs(options, &fs, &db));
     gate.database = db;
-    gate.fd_baseline = process_fd_count();
     const char *first[] = {"a", "b", "c"};
     for (size_t i = 0; i < 3; ++i)
         OK(fastdb_put(db, first[i], 1, old_bytes.data, old_bytes.size));
     wait_worker_maintenance(db, 3);
+    OK(fastdb_compact(db));
+    const char *second[] = {"a", "d", "f"};
+    for (size_t i = 0; i < 3; ++i)
+        OK(fastdb_put(db, second[i], 1, new_bytes.data, new_bytes.size));
+    wait_worker_maintenance(db, 6);
 
     CHECK(pthread_mutex_lock(&gate.mutex) == 0);
     gate.remaining = 1;
     gate.compaction_only = true;
     CHECK(pthread_mutex_unlock(&gate.mutex) == 0);
-    const char *second[] = {"d", "e", "f"};
+    const char *third[] = {"j", "k", "l"};
     for (size_t i = 0; i < 3; ++i)
-        OK(fastdb_put(db, second[i], 1, new_bytes.data, new_bytes.size));
+        OK(fastdb_put(db, third[i], 1, new_bytes.data, new_bytes.size));
     wait_for_gate(&gate);
     CHECK(gate.engine_mutex_available);
     CHECK(pthread_mutex_lock(&db->mutex) == 0);
     CHECK(db->flush->compaction_running);
     CHECK(pthread_mutex_unlock(&db->mutex) == 0);
 
-    /* Publish a fresh L0 while the selected input streams are still merging. */
-    OK(fastdb_put(db, "g", 1, old_bytes.data, old_bytes.size));
-    OK(fastdb_flush(db));
-    expect_value(db, (FastDBSlice){"g", 1}, old_bytes, 7);
+    /* Keep an actual point-read descriptor open while the worker keeps its input streams. */
     CHECK(pthread_mutex_lock(&gate.mutex) == 0);
-    CHECK(gate.fd_peak >= 6 && gate.fd_peak <= gate.fd_budget);
+    gate.hold_reader = true;
     CHECK(pthread_mutex_unlock(&gate.mutex) == 0);
+    pthread_t reader;
+    CHECK(pthread_create(&reader, NULL, read_compaction_input, db) == 0);
+    CHECK(pthread_mutex_lock(&gate.mutex) == 0);
+    while (!gate.reader_reached)
+        CHECK(pthread_cond_wait(&gate.condition, &gate.mutex) == 0);
+    CHECK(pthread_mutex_unlock(&gate.mutex) == 0);
+
+    /* Publish a fresh L0 while the point read and the merge are both paused. */
+    OK(fastdb_put(db, "g", 1, old_bytes.data, old_bytes.size));
+    OK(fastdb_put(db, "h", 1, old_bytes.data, old_bytes.size));
+    OK(fastdb_put(db, "i", 1, old_bytes.data, old_bytes.size));
+    OK(fastdb_flush(db));
+    STATUS(fastdb_flush(db), FASTDB_BUSY);
+    expect_value(db, (FastDBSlice){"g", 1}, old_bytes, 10);
+    CHECK(pthread_mutex_lock(&gate.mutex) == 0);
+    if (gate.fd_peak < 9 || gate.fd_peak > gate.fd_budget)
+        fprintf(stderr, "overlap descriptor peak %zu, budget %zu\n", gate.fd_peak, gate.fd_budget);
+    CHECK(gate.fd_peak >= 9 && gate.fd_peak <= gate.fd_budget);
+    gate.hold_reader = false;
+    gate.reader_released = true;
+    CHECK(pthread_cond_broadcast(&gate.condition) == 0);
+    CHECK(pthread_mutex_unlock(&gate.mutex) == 0);
+    CHECK(pthread_join(reader, NULL) == 0);
 
     pthread_t closer;
     CHECK(pthread_create(&closer, NULL, close_db, db) == 0);
@@ -481,11 +519,14 @@ static void close_drains_background_compaction(void)
     CHECK(pthread_mutex_unlock(&db->mutex) == 0);
     release_gate(&gate);
     CHECK(pthread_join(closer, NULL) == 0);
+    CHECK(process_fd_count() == gate.fd_baseline);
 
     OK(fastdb_open(options, &db));
-    expect_value(db, (FastDBSlice){"a", 1}, old_bytes, 1);
+    expect_value(db, (FastDBSlice){"a", 1}, new_bytes, 4);
+    expect_value(db, (FastDBSlice){"b", 1}, old_bytes, 2);
     expect_value(db, (FastDBSlice){"f", 1}, new_bytes, 6);
-    expect_value(db, (FastDBSlice){"g", 1}, old_bytes, 7);
+    expect_value(db, (FastDBSlice){"g", 1}, old_bytes, 10);
+    expect_value(db, (FastDBSlice){"i", 1}, old_bytes, 12);
     OK(fastdb_close(db));
     CHECK(pthread_cond_destroy(&gate.condition) == 0);
     CHECK(pthread_mutex_destroy(&gate.mutex) == 0);
