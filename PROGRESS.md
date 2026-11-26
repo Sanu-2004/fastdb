@@ -4,10 +4,10 @@
 **Repository:** https://github.com/Sanu-2004/fastdb  
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
-**Last updated:** 2026-11-25  
-**Last verified base commit / branch:** `0415f7d` / `main`. The background-flush increment is verified in V036. The archived `ca5a528` baseline is V001–V002.
+**Last updated:** 2026-11-26  
+**Last verified base commit / branch:** `fd45626` / `main`. The P3.5 read-view increment is verified in V037–V040. The archived `ca5a528` baseline is V001–V002.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
-**Next task:** P3.5 — pin SSTable read views and delay obsolete-file deletion through publication.
+**Next task:** P3.6 — reserve, run, and revalidate background compaction jobs.
 
 ## 1. How to use this file
 
@@ -98,7 +98,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P3.2 | K-way merge and bounded output splitting, file/metadata buffers and fan-in; tests for duplicate keys and errors. | DONE | V019–V021. Heap merge with reader/heap/writer workspace and fan-in limits, output count cap, key-group-preserving temporary output splitting and hard metadata limits. |
 | P3.3 | Leveled scheduler, overlap closure, L0 and L1+ invariants, byte thresholds, cascading and bottommost behavior. | DONE | V026–V028. Serial threshold selection, cascading, closed range checks, two-input overlap staging and terminal level behavior. [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
 | P3.4 | Manual range/full compaction and disabled mode; atomic manifest publication and safe reclamation. | DONE | V026–V028. Native and CLI maintenance, active WAL continuity, bounded admission, old input retention on failure, reopen, and nine compaction process-kill cases. Full maintenance promotes eligible tables to the last level and retains all history. |
-| P3.5 | Coherent read-view capture, pinned versions/files, active-to-immutable rotation and background flush worker(s). | IN_PROGRESS | V031 verifies the WAL prefix cut. V036 verifies the single frozen slot and background worker. SSTable read-view pinning is still open. |
+| P3.5 | Coherent read-view capture, pinned versions/files, active-to-immutable rotation and background flush worker(s). | DONE | V031, V036–V037. Optional single flush worker, bounded pinned GET/exists, coherent frozen and active reads, deferred reclamation, worker resumption, and shutdown. [ADR 0006](docs/adr/0006-pinned-sstable-reads.md). |
 | P3.6 | Compaction worker(s), conflict reservations, commit revalidation, scheduling, safe failure/cancel/shutdown. | TODO | — |
 | P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | TODO | — |
 | P3.8 | Native snapshots and history retention across memtable and disk; atomic batch visibility; coherent merged scans. | TODO | — |
@@ -169,7 +169,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P7.7 | Real LSM visualizer, actual file ranges, memtable/WAL/compaction stats; memory mode display. | TODO | — |
 | P7.8 | Admin flush/compact/backup/restore/import/export, permissions and confirmations. | TODO | — |
 | P7.9 | Playwright against real backend, mode creation, CRUD, nested edit, schema errors, conflicts, maintenance/deletion. | TODO | — |
-| P7.10 | Docker/Compose, persistent volume, non-root runtime, secure defaults, health checks; restart and smoke tests. | IN_PROGRESS | V029–V030, V032. Native image builds, runs with UID/GID 10001 and recovers both persistent modes across containers. Compose, health and service shutdown depend on the server and Studio. |
+| P7.10 | Docker/Compose, persistent volume, non-root runtime, secure defaults, health checks; restart and smoke tests. | IN_PROGRESS | V040 verifies the native image, UID/GID 10001 and recovery in both persistent modes across containers. Compose, health and service shutdown depend on the server and Studio. |
 
 **P7 exit gate:** Real browser client and documented deployment verified end-to-end, not a mockup.
 
@@ -196,23 +196,23 @@ Gate status is independent of individual task status. PASS requires actual recor
 
 | Gate | Required evidence | Status | Evidence ID |
 |---|---|---|---|
-| G01 | Reproducible GCC + Clang build, C API/CLI and warnings check | PASS | V023, V031–V032 |
+| G01 | Reproducible GCC + Clang build, C API/CLI and warnings check | PASS | V023, V037, V040 |
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021 |
 | G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021 |
 | G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021 |
 | G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | NOT RUN | V026–V028 cover the serial leveled path and tombstone masking. Full gate still needs TTL, snapshots and remaining compaction integration. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | NOT RUN | — |
-| G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V031 for current native paths. 27 process-kill scenarios across flush, checkpoint and compaction. |
+| G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V037 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | — |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V021–V022 partial. Local TSan error V006. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V037 sanitizer pass. B004 remains open after V039. Fuzz verification remains pending. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
 | G14 | Authentication/authorization and security/resource-limit tests | NOT RUN | — |
 | G15 | Backup/restore and import/export drill; restart and continued writes | NOT RUN | — |
 | G16 | Studio Playwright real-backend tests, build/lint/typecheck | NOT RUN | — |
-| G17 | Docker Compose end-to-end, volume persistence, health and shutdown | NOT RUN | Native image and restart checks passed in V032. |
+| G17 | Docker Compose end-to-end, volume persistence, health and shutdown | NOT RUN | Native image and restart checks passed in V040. |
 | G18 | Actual reproducible benchmarks and documented resource/latency results | NOT RUN | — |
 | G19 | CI mandatory jobs, versioned build deliverables, docs and engineering report | NOT RUN | — |
 | G20 | Final risk/limitation audit; independent review and deployment caveats documented | NOT RUN | — |
@@ -259,6 +259,10 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V034 | 2026-11-25 / Session 004 starting checkpoint | `cmake -S . -B /tmp/fastdb-resume -DCMAKE_BUILD_TYPE=Debug`, `cmake --build /tmp/fastdb-resume --parallel`, `ctest --test-dir /tmp/fastdb-resume --output-on-failure` in the read-only Debian toolchain container. | PASS | 21/21 before P3.5 engine changes. |
 | V035 | 2026-11-25 / first worker implementation | GCC Debug CMake build and CTest in `/tmp/fastdb-bg` in the same container. | FAIL | 20/21. The worker state embedded in each handle exhausted a previously supported 512-byte memory-mode budget. The state now uses a separate, charged allocation only for background LSM handles. |
 | V036 | 2026-11-25 / background-flush increment | GCC Debug, Clang Release and GCC ASan/UBSan/LSan, `/tmp/fastdb-bg-$profile`; see [native verification](docs/verification/NATIVE_CHECKPOINT.md). | PASS | 22/22 in each configuration. The worker test covers a later WAL rotation before publication, frozen lookup, CAS, tombstone masking, saturation, ENOSPC retry, failed-rotation rollback, close during work and recovery after SIGKILL. |
+| V037 | 2026-11-26 / P3.5 pinned SSTable reads | GCC Debug, Clang Release and GCC ASan/UBSan/LSan in `/tmp/fastdb-pin-$profile`; see native verification. | PASS | 23/23 per profile. Tests pin a table before opening it across compaction for PUT and tombstone cases. A separate case verifies background flush publication, deferred work and resumption after pin release. |
+| V038 | 2026-11-26 / pinned-read concurrency repeat | `ctest --test-dir /tmp/fastdb-pin-gcc -L concurrency --repeat until-fail:20 --output-on-failure` | PASS | Three concurrency suites completed 20 repetitions each. |
+| V039 | 2026-11-26 / pinned-read and worker TSan retry | GCC Debug `-DFASTDB_SANITIZER=thread`; `ctest --test-dir /tmp/fastdb-pin-tsan -L concurrency --output-on-failure`. | FAIL | All three binaries stopped before test code with `ThreadSanitizer: unexpected memory mapping`. No race-check result. |
+| V040 | 2026-11-26 / P3.5 native Docker image | `docker build --progress=plain -t fastdb-native:local .` and the two-volume restart smoke in native verification. | PASS | 23/23 Release tests. Both persistent modes recovered from another container. Image ID `sha256:246bb725ec848d19e00979251e6ac8d6a19799ee931e46c618d3bdd2980c79ee`, Linux amd64, UID/GID 10001. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -290,6 +294,7 @@ For stress/fuzz/benchmarks, log seed, operation counts, workload, duration, data
 | D007 | Native serial storage and persistent-memory checkpoint coverage separate from the newest live revision | Accepted in [ADR 0003](docs/adr/0003-serial-native-persistence.md). V019–V021. |
 | D008 | Oversized overlap closure promotes a bounded prefix while the suffix stays at its source level | Accepted in [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). Each job commits one catalog edit under the existing mutex. V026–V028. |
 | D009 | One optional background flush worker and one immutable slot per LSM database | Accepted in [ADR 0005](docs/adr/0005-single-immutable-flush-worker.md). Foreground writes can continue while the SSTable is built. A combined active/frozen metadata bound keeps WAL replay admissible. |
+| D010 | One bounded pinned SSTable read per LSM database with one deferred reclamation interval | Accepted in [ADR 0006](docs/adr/0006-pinned-sstable-reads.md). Conditional writes retain mutex serialization. V037–V038. |
 
 Add new ADR links (`docs/adr/NNNN-title.md`) for consequential changes. An agent may refine implementation details but may not silently reduce required guarantees.
 
@@ -300,7 +305,7 @@ Add new ADR links (`docs/adr/NNNN-title.md`) for consequential changes. An agent
 | B001 | Initial checkout, historical build, sample data and Linux toolchain inspection. | RESOLVED | V001–V002. Use Docker for Linux verification in this environment. |
 | B002 | No license file exists in the inspected checkout. | OPEN | Owner decision before selecting a license or redistributing. Local implementation can continue. |
 | B003 | Whether real legacy database files require migration is unknown. | OPEN | Canonical single-WAL export verified. Any owner data in multiple WALs or legacy tables needs separate analysis before migration. |
-| B004 | Local GCC ThreadSanitizer executable fails in the Docker/WSL2 environment. | OPEN | V006. Run the native workflow or another Linux host with a compatible TSan runtime. Normal concurrency and ASan results do not establish this gate. |
+| B004 | Local GCC ThreadSanitizer executable fails in the Docker/WSL2 environment. | OPEN | V006 and V039. Run the native workflow or another Linux host with a compatible TSan runtime. Normal concurrency and ASan results do not establish this gate. |
 
 Add blocker details, affected task IDs, reproduction, attempted solutions, and next action. Close only when resolved. External constraints (missing Docker, TSan support, etc.) must be recorded as NOT RUN/BLOCKED rather than PASS.
 
@@ -363,21 +368,22 @@ These are deliberate boundaries, not completed features:
 - Built the multi-stage native image in V029 and rebuilt it from the final sources in V032. V030 and V032 verified UID/GID 10001, the SDK files, an LSM reopen after flush and compact, and a persistent-memory reopen with both a checkpointed record and WAL records. All smoke data lived in temporary named volumes. Server and Studio have no runnable components yet. Their container stages, Compose and health checks remain within P7.10.
 - No commit was made. New work is in the root Docker files and README, native CLI/API/core/storage code, CMake tests and native documentation. The archived source and owner data were preserved.
 
-### Session 004 — 2026-11-25 — Background flush and read views
+### Session 004 — 2026-11-25 to 2026-11-26 — Background flush and read views
 
 - The uncommitted native checkpoint passed 21/21 on resume (V034). Committed and pushed `0415f7d` to `origin/main` before modifying the engine for P3.5.
 - The first worker build exposed a memory-mode budget regression (V035). Moved worker state out of handles that use synchronous maintenance and reran the existing budget test with its original assertions.
 - V036 verified the optional worker with the full GCC, Clang and sanitizer suites. The gate-controlled worker test demonstrates writes during table construction, active WAL rotation, backpressure, retry, and clean or interrupted shutdown. See D009.
+- Committed and pushed the worker as `fd45626`. Completed P3.5 by charging a bounded pinned point read and deferring reclamation through publication. V037–V038 verify old-value and tombstone reads crossing compaction, retained name lifetimes, and a flush worker that resumes when the pin releases. V039 records the local TSan startup failure. V040 rebuilt the Docker image and verified both persistent-volume restart paths.
 
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
-- **Next task ID:** P3.5.
-- **Next action:** In `src/core/engine.c` and `src/core/disk.c`, capture a bounded SSTable read view under `FastDB.mutex` and protect its files from `fdb_storage_reclaim_orphans` while a point reader runs outside the mutex. Keep CAS checks under the writer lock. Test a stalled table read that crosses compaction publication and assert that the old file remains until the read releases its view.
-- **Next commands:** Run `make test` and `make test-recovery` with disposable directories after the first engine-level freeze change. Use the compiler and sanitizer commands in [native verification](docs/verification/NATIVE_CHECKPOINT.md). Keep pinned reader and rotation failure tests with the other native recovery fixtures.
-- **Last verified good checkpoint:** All three public storage modes, offline canonical-WAL export, serial leveled compaction and the optional LSM background flush worker. GCC, Clang and ASan/UBSan/LSan each passed 22/22. The preceding native Docker checkpoint passed 21/21 plus both persistent volume checks.
-- **Working-tree state:** `0415f7d` is on `origin/main`. This increment changes the native engine, L0 publication, tests and documentation. No owner data was opened in tests.
-- **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.5 can proceed locally with normal builds and other sanitizers.
-- **Critical limits:** Worker table construction runs outside the mutex. Table reads, catalog publication, explicit flush and compaction still hold it. Size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
+- **Next task ID:** P3.6.
+- **Next action:** In `src/storage/compaction.c`, separate stable input and range reservation, unlocked streaming output, and locked publication. Reserve a bounded range of file IDs before releasing the mutex. Revalidate selected input IDs and the destination closure against the current catalog at commit. Reuse the pinned-file reclamation boundary and ensure cleanup leaves in-flight outputs available. Start with one compaction job per database. Test a job paused during merge while newer WALs and L0 files are published, then exercise clean cancellation, conflict and shutdown and confirm reopen.
+- **Next commands:** Run `make test`, `make test-recovery` and `make test-concurrency` with disposable directories after the first compaction executor change. Use `tests/native/compaction.c`, `public_crash.c` and `read_view.c` as regression entry points. See [native verification](docs/verification/NATIVE_CHECKPOINT.md) for compiler and sanitizer commands.
+- **Last verified good checkpoint:** All three native storage modes, automatic flush when configured, serial leveled compaction and pinned SSTable point reads. GCC, Clang, ASan/UBSan/LSan and Docker Release each passed 23/23. Docker also passed both persistent volume checks.
+- **Working-tree state:** Native progress was pushed to `origin/main` through `fd45626` before the P3.5 read-view increment. The latter changes core/storage, tests and documentation. No owner data was opened in tests.
+- **Unresolved blockers:** B002 license decision, B003 uncertainty about real legacy sources, B004 local TSan. P3.6 can proceed locally with normal builds and other sanitizers.
+- **Critical limits:** The worker's SSTable build and one bounded point read can run outside the mutex. Catalog publication and compaction still take the mutex. Size-tiered compaction, LSM scans, snapshots, TTL writes, history reclamation, power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

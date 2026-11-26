@@ -82,6 +82,12 @@ keeps the original inputs. Uncertain publication poisons the handle so
 reopen can select the authoritative state before any deletion. A retry after
 a certain error cleans orphans from the prior attempt using the active catalog.
 
+When a point lookup pins SSTable names, the installed catalog can advance
+while original files remain available. The publisher defers reclamation and
+any further replacement waits for the pin to release. The next maintenance
+call or close retries file cleanup. Recovery runs after exclusive directory
+lock acquisition and has no readers from the previous process.
+
 LSM recovery validates every referenced SSTable and compares its metadata
 with the catalog, including the closed range invariant for deeper levels.
 It replays the remaining WALs in catalog order before

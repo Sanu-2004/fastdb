@@ -32,6 +32,8 @@ thread stacks, caller-owned GET results, and caller-owned options and batches
 are outside the engine budget. Batches have their own per-handle limits.
 Persistent handles reserve workspace for bounded table and catalog
 operations. `FastDBStats.memory_bytes` includes this reservation.
+An unlocked LSM read charges copied candidate-table bounds and an extra
+table reader workspace against that same engine budget.
 `FastDBStats.record_count` reports in-memory entries. The LSM count includes
 entries and tombstones in both trees. An overwritten key can appear in both
 counts until publication removes the frozen copy.
@@ -57,6 +59,12 @@ published catalog. The last level receives data and has no automatic
 promotion. Every compaction job retains the manifest sequence and the active
 WAL. A manual call can complete several independent catalog edits.
 See [ADR 0004](adr/0004-serial-leveled-compaction.md).
+
+Point lookups use one bounded, reference-protected catalog view per LSM
+database. The capture contains the matching entries from one installed
+generation and the observed live revision. It also represents the absence
+of the key from both memory trees at that instant. File reclamation defers
+while this view is pinned. See [ADR 0006](adr/0006-pinned-sstable-reads.md).
 
 See [concurrency](CONCURRENCY.md) for linearization and ownership,
 [durability](DURABILITY.md) for persistent modes and publication,

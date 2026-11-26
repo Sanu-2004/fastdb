@@ -298,3 +298,30 @@ explicit retry after ENOSPC, safe active-tree retention after a failed WAL
 rotation, and clean close during output construction. A subprocess case
 acknowledges both WAL ranges, kills the process during construction and
 reopens with all seven revisions and the tombstone intact.
+
+## Pinned SSTable reads
+
+V037 used the same compiler and sanitizer matrix in `/tmp/fastdb-pin-$profile`.
+Each profile passed 23 of 23. The pinned reads paused before opening the
+referenced table. Compaction replaced the catalog, but obsolete names
+remained available until the read released its view and maintenance resumed.
+Both an old value and a masking tombstone were covered. A separate case
+verified that a background flush publishes while a reader is pinned and
+that subsequent background work waits for the pin to release.
+
+```sh
+ctest --test-dir /tmp/fastdb-pin-gcc -L concurrency --repeat until-fail:20 --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/fastdb-pin-tsan -DCMAKE_BUILD_TYPE=Debug -DFASTDB_SANITIZER=thread
+cmake --build /tmp/fastdb-pin-tsan --parallel
+ctest --test-dir /tmp/fastdb-pin-tsan -L concurrency --output-on-failure
+```
+
+V038 completed 20 repetitions of each of the three concurrency suites.
+V039 built the TSan binaries, but the runtime aborted before test code with
+`unexpected memory mapping` for every suite. The first invocation of the
+matrix and TSan commands used a regular expression that Windows argument
+marshalling split. The corrected commands use the CTest label.
+
+V040 rebuilt the native image and reran the volume restart checks above.
+The image ran as UID/GID 10001. Release CTest passed 23 of 23. Both LSM and
+persistent memory recovered the expected values from fresh containers.

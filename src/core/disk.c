@@ -240,6 +240,8 @@ FastDBStatus fdb_disk_close(FDBDisk *disk)
         return FASTDB_OK;
     FastDBStatus status = disk->durability == FASTDB_DURABILITY_ASYNC ?
                           fdb_wal_set_sync(&disk->log) : FASTDB_OK;
+    if (status == FASTDB_OK && disk->log.reclaim_pending)
+        status = fdb_storage_prepare_maintenance(&disk->log);
     FastDBStatus wal_status = fdb_wal_set_close(&disk->log);
     FastDBStatus dir_status = fdb_dir_close(&disk->dir);
     free(disk);
@@ -312,15 +314,20 @@ static FastDBStatus find_in_table(const FDBDisk *disk, const FDBManifestEntry *e
     return status == FASTDB_OK ? close_status : status;
 }
 
-FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
-                           bool copy, FDBLookup *out)
+static bool lookup_candidate(const FDBManifestEntry *entry, FastDBSlice key,
+                              uint64_t sequence, uint64_t found)
 {
-    const FDBManifest *catalog = &disk->log.catalog.view;
-    for (size_t i = catalog->count; i != 0; --i) {
-        const FDBManifestEntry *entry = &catalog->entries[i - 1];
-        if (entry->kind != FDB_FILE_SSTABLE || entry->sequence_end <= out->revision ||
-            entry->sequence_begin > sequence || fdb_compare(entry->min_key, key) > 0 ||
-            fdb_compare(entry->max_key, key) < 0)
+    return entry->kind == FDB_FILE_SSTABLE && entry->sequence_end > found &&
+           entry->sequence_begin <= sequence && fdb_compare(entry->min_key, key) <= 0 &&
+           fdb_compare(entry->max_key, key) >= 0;
+}
+
+static FastDBStatus find_entries(const FDBDisk *disk, const FDBManifestEntry *entries, size_t count,
+                                  FastDBSlice key, uint64_t sequence, bool copy, FDBLookup *out)
+{
+    for (size_t i = count; i != 0; --i) {
+        const FDBManifestEntry *entry = &entries[i - 1];
+        if (!lookup_candidate(entry, key, sequence, out->revision))
             continue;
         FastDBStatus status = find_in_table(disk, entry, key, sequence, copy, out);
         if (status != FASTDB_OK)
@@ -329,18 +336,92 @@ FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequen
     return FASTDB_OK;
 }
 
+FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
+                           bool copy, FDBLookup *out)
+{
+    const FDBManifest *catalog = &disk->log.catalog.view;
+    return find_entries(disk, catalog->entries, catalog->count, key, sequence, copy, out);
+}
+
+size_t fdb_disk_pinned_bytes(const FDBDisk *disk)
+{
+    return disk == NULL ? 0 : disk->log.pinned_read_bytes;
+}
+
+bool fdb_disk_maintenance_waiting(const FDBDisk *disk)
+{
+    return disk->log.reclaim_pending && disk->log.pinned_read_bytes != 0;
+}
+
+FastDBStatus fdb_disk_pin_read(FDBDisk *disk, FastDBSlice key, uint64_t sequence,
+                               size_t headroom, FDBDiskRead *view)
+{
+    *view = (FDBDiskRead){.sequence = sequence};
+    if (disk->log.pinned_read_bytes != 0 || disk->log.reclaim_pending)
+        return FASTDB_BUSY;
+    const FDBManifest *catalog = &disk->log.catalog.view;
+    size_t bytes = 0, count = 0;
+    for (size_t i = 0; i < catalog->count; ++i) {
+        const FDBManifestEntry *entry = &catalog->entries[i];
+        if (lookup_candidate(entry, key, sequence, 0)) {
+            if (!fdb_add_size(bytes, sizeof(*entry), &bytes) ||
+                !fdb_add_size(bytes, entry->min_key.size, &bytes) ||
+                !fdb_add_size(bytes, entry->max_key.size, &bytes))
+                return FASTDB_BUSY;
+            ++count;
+        }
+    }
+    if (count == 0)
+        return FASTDB_OK;
+    size_t charge;
+    if (!fdb_add_size(bytes, disk->reader_bytes, &charge) || charge > headroom)
+        return FASTDB_BUSY;
+    FDBManifestEntry *entries = malloc(bytes);
+    if (entries == NULL)
+        return FASTDB_BUSY;
+    unsigned char *bounds = (unsigned char *)(entries + count);
+    size_t next = 0;
+    for (size_t i = 0; i < catalog->count; ++i) {
+        if (lookup_candidate(&catalog->entries[i], key, sequence, 0)) {
+            entries[next] = catalog->entries[i];
+            fdb_manifest_copy_bounds(&entries[next++], &bounds);
+        }
+    }
+    view->entries = entries;
+    view->count = count;
+    disk->log.pinned_read_bytes = charge;
+    return FASTDB_OK;
+}
+
+FastDBStatus fdb_disk_find_pinned(const FDBDisk *disk, const FDBDiskRead *view, FastDBSlice key,
+                                  bool copy, FDBLookup *out)
+{
+    return find_entries(disk, view->entries, view->count, key, view->sequence, copy, out);
+}
+
+void fdb_disk_unpin_read(FDBDisk *disk, FDBDiskRead *view)
+{
+    free(view->entries);
+    disk->log.pinned_read_bytes = 0;
+}
+
 FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
 {
     if (!fdb_disk_has_tables(disk))
         return FASTDB_UNSUPPORTED;
-    FastDBStatus status = fdb_flush_l0(&disk->log, tree, disk->log.wal.sequence, &disk->table);
+    FastDBStatus status = fdb_storage_prepare_maintenance(&disk->log);
+    if (status == FASTDB_OK)
+        status = fdb_flush_l0(&disk->log, tree, disk->log.wal.sequence, &disk->table);
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
 FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequence)
 {
-    if (disk->log.poisoned)
-        return FASTDB_COMMIT_UNCERTAIN;
+    FastDBStatus ready = fdb_storage_prepare_maintenance(&disk->log);
+    if (ready != FASTDB_OK)
+        return ready;
+    if (disk->log.pinned_read_bytes != 0)
+        return FASTDB_BUSY;
     FastDBStatus status = fdb_storage_reclaim_orphans(&disk->log);
     if (status == FASTDB_OK)
         status = fdb_flush_l0(&disk->log, tree, sequence, &disk->table);
@@ -349,7 +430,8 @@ FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequen
 
 FastDBStatus fdb_disk_rotate_wal(FDBDisk *disk)
 {
-    return fdb_wal_set_rotate(&disk->log);
+    FastDBStatus status = fdb_storage_prepare_maintenance(&disk->log);
+    return status == FASTDB_OK ? fdb_wal_set_rotate(&disk->log) : status;
 }
 
 FastDBStatus fdb_disk_flush_reserve(FDBDisk *disk, FDBFlushOutput *output)
@@ -374,6 +456,9 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
         return manual ? FASTDB_UNSUPPORTED : FASTDB_OK;
     if (disk->log.poisoned)
         return FASTDB_COMMIT_UNCERTAIN;
+    FastDBStatus ready = fdb_storage_prepare_maintenance(&disk->log);
+    if (ready != FASTDB_OK)
+        return ready == FASTDB_BUSY && !manual ? FASTDB_OK : ready;
     if (disk->compaction_cleanup_needed) {
         FastDBStatus cleanup = fdb_storage_reclaim_orphans(&disk->log);
         if (cleanup != FASTDB_OK)
@@ -418,6 +503,9 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
         status = fdb_compaction_plan(&disk->log.catalog.view, &policy, manual, range, inputs, &plan);
         if (status != FASTDB_OK || plan.count == 0)
             break;
+        status = fdb_storage_prepare_maintenance(&disk->log);
+        if (status != FASTDB_OK)
+            break;
         if (plan.count > affordable) {
             status = FASTDB_LIMIT_EXCEEDED;
             break;
@@ -430,7 +518,7 @@ FastDBStatus fdb_disk_compact(FDBDisk *disk, bool manual, const FastDBRange *ran
     }
     if (inputs != inline_inputs)
         free(inputs);
-    return status;
+    return status == FASTDB_BUSY && !manual ? FASTDB_OK : status;
 }
 
 FastDBStatus fdb_disk_checkpoint(FDBDisk *disk, FDBTree *tree)

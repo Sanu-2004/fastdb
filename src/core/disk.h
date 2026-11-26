@@ -14,6 +14,12 @@ typedef struct FDBLookup {
     FDBRecordKind kind;
 } FDBLookup;
 
+typedef struct FDBDiskRead {
+    FDBManifestEntry *entries;
+    size_t count;
+    uint64_t sequence;
+} FDBDiskRead;
+
 FastDBStatus fdb_lookup_record(const FDBRecord *record, bool copy, FDBLookup *out);
 FastDBStatus fdb_disk_validate(const FastDBOptions *options);
 FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs *fs,
@@ -27,6 +33,14 @@ FastDBStatus fdb_disk_frame_size(const FDBDisk *disk, const FDBRecord *records,
 FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count);
 FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
                            bool copy, FDBLookup *out);
+size_t fdb_disk_pinned_bytes(const FDBDisk *disk);
+bool fdb_disk_maintenance_waiting(const FDBDisk *disk);
+/* Capture/release under the engine mutex. BUSY permits a serialized lookup instead. */
+FastDBStatus fdb_disk_pin_read(FDBDisk *disk, FastDBSlice key, uint64_t sequence,
+                               size_t headroom, FDBDiskRead *view);
+FastDBStatus fdb_disk_find_pinned(const FDBDisk *disk, const FDBDiskRead *view, FastDBSlice key,
+                                  bool copy, FDBLookup *out);
+void fdb_disk_unpin_read(FDBDisk *disk, FDBDiskRead *view);
 FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree);
 FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequence);
 FastDBStatus fdb_disk_rotate_wal(FDBDisk *disk);

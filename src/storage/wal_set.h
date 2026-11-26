@@ -11,6 +11,8 @@ typedef struct FDBWalSet {
     FDBWal wal;
     size_t active_index;
     size_t corrupt_filter_partitions;
+    size_t pinned_read_bytes;
+    bool reclaim_pending;
     bool poisoned;
 } FDBWalSet;
 

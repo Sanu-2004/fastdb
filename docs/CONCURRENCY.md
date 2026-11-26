@@ -1,11 +1,12 @@
 # Concurrency and ownership
 
-The database mutex protects the memory tree, revision counter, catalog view,
+The database mutex protects the memory trees, revision counter, catalog view,
 and iterator accounting. There is one engine lock per database. Commits
 linearize at the final revision publication inside that critical section.
 Persistent commits preallocate their replacement nodes and stage the
 complete WAL frame before exposing mutations. GET, exists and stats
-linearize at their locked observation. Memory-mode and persistent-memory
+linearize at their locked observation or the capture of a pinned catalog.
+Memory-mode and persistent-memory
 scan pages linearize during locked construction and own their copies.
 
 All batch checks use the pre-batch read view, including checks listed after
@@ -31,18 +32,29 @@ that page opened. The last key can be used as an exclusive lower bound for
 the next range page. Independently opened pages see independent read views.
 
 The owner must prevent new operations and quiesce existing operations before
-calling close. A database with open iterators returns `FASTDB_BUSY` and stays
-open. Close all iterators and then retry. A close that reaches persistent
+calling close. A database with open iterators or an outstanding pinned read
+returns `FASTDB_BUSY` and stays open. Release the iterators or let the read
+finish, then retry. A close that reaches persistent
 cleanup consumes the handle even if sync or cleanup returns an error.
 GET copies are independent of that lifetime.
 
-An LSM lookup checks the active tree, then the frozen tree, then the catalog.
-All three are captured under the engine mutex. The first matching tree entry
-wins, including a tombstone. On-disk lookups still hold the mutex through
-table reads. Compaction swaps the in-memory catalog after durable publication,
-then reclaims inputs while still holding the mutex. Reads entering afterward
-observe the replacement catalog and the same logical revisions. A manual call
-can commit multiple catalog edits while holding the mutex.
+An LSM lookup checks the active tree and then the frozen tree under the
+mutex. The first matching tree entry wins, including a tombstone. If both
+trees lack the key, GET and exists can copy the relevant SSTable entries and
+captured revision, pin file lifetime, and release the mutex during reads.
+Each database allows one such reader. A second reader, insufficient
+headroom, or pending cleanup uses a serialized lookup. CAS and batch
+conditions always use the locked path so checks and publication remain one
+operation. The reader owns the copied metadata until it reacquires the mutex
+to release its pin.
+
+Compaction swaps the catalog after durable publication. Subsequent readers
+observe that catalog, while a pinned reader can still open the original
+files by name. One reclamation interval may be deferred. While it is deferred
+and the files are pinned, further manual maintenance may return `FASTDB_BUSY`
+and the background worker waits. The next maintenance call or close reclaims
+the obsolete files after the reader releases them. A manual compaction may
+report `FASTDB_BUSY` after one successful catalog edit.
 For keys absent from memory, the engine compares matching tables by revision.
 The background worker holds the mutex for WAL rotation, catalog commits and
 reclamation. It releases the mutex while it constructs and syncs the SSTable

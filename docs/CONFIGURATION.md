@@ -59,10 +59,14 @@ zero keeps manual flush available without a worker. The threshold measures
 allocated active-tree node bytes. A full batch can take the tree above the
 threshold. Reopen to change the setting. The worker adds a fixed state
 allocation and reserves a writer and reader workspace for concurrent I/O.
+Point reads that run outside the mutex additionally charge the copied table
+metadata and one reader workspace against unused memory headroom. Other
+point reads can use the serial workspace.
 
 While the one frozen slot is occupied, writes into a new active tree can
 continue within the memory and metadata budgets. Writes return `FASTDB_BUSY`
 when that tree reaches the threshold before the worker frees the slot. The
+same backpressure applies if a pinned reader delays file reclamation. The
 combined key metadata must also fit one replay tree, since recovery can see
 both WAL ranges before the frozen table is installed. A background error
 pauses automatic work and is returned by close or a write that needs the slot.

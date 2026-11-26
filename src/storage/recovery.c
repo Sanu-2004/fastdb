@@ -154,6 +154,11 @@ static FastDBStatus reclaim_file(void *context, const char *name)
 
 FastDBStatus fdb_storage_reclaim_orphans(FDBWalSet *set)
 {
+    if (set->poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    set->reclaim_pending = true;
+    if (set->pinned_read_bytes != 0)
+        return FASTDB_OK;
     /* Select a durable catalog before deleting files an older name could still reference. */
     FastDBStatus status = fdb_dir_sync(set->dir);
     if (status != FASTDB_OK)
@@ -168,7 +173,20 @@ FastDBStatus fdb_storage_reclaim_orphans(FDBWalSet *set)
                 status = sync_status;
         }
     } while (status == FASTDB_OK && reclaim.removed);
+    if (status == FASTDB_OK)
+        set->reclaim_pending = false;
     return status;
+}
+
+FastDBStatus fdb_storage_prepare_maintenance(FDBWalSet *set)
+{
+    if (set->poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    if (!set->reclaim_pending)
+        return FASTDB_OK;
+    if (set->pinned_read_bytes != 0)
+        return FASTDB_BUSY;
+    return fdb_storage_reclaim_orphans(set);
 }
 
 static FastDBStatus recover(const FDBDirectory *dir, const FDBManifestLimits *manifest_limits,

@@ -223,7 +223,8 @@ static void *flush_worker(void *arg)
     FDBBackgroundFlush *flush = db->flush;
     pthread_mutex_lock(&db->mutex);
     while (!flush->stopping) {
-        if (flush->error != FASTDB_OK || flush->waiters != 0 || db->tree.bytes < flush->threshold) {
+        if (flush->error != FASTDB_OK || flush->waiters != 0 || db->tree.bytes < flush->threshold ||
+            fdb_disk_maintenance_waiting(db->disk)) {
             pthread_cond_wait(&flush->condition, &db->mutex);
             continue;
         }
@@ -298,15 +299,19 @@ FastDBStatus fastdb_close(FastDB *db)
 {
     if (db == NULL)
         return FASTDB_INVALID_ARGUMENT;
-    if (db->iterator_count != 0)
+    pthread_mutex_lock(&db->mutex);
+    if (db->iterator_count != 0 || fdb_disk_pinned_bytes(db->disk) != 0) {
+        pthread_mutex_unlock(&db->mutex);
         return FASTDB_BUSY;
+    }
     FastDBStatus maintenance = FASTDB_OK;
     FDBBackgroundFlush *flush = db->flush;
     if (flush != NULL) {
-        pthread_mutex_lock(&db->mutex);
         flush->stopping = true;
         pthread_cond_broadcast(&flush->condition);
-        pthread_mutex_unlock(&db->mutex);
+    }
+    pthread_mutex_unlock(&db->mutex);
+    if (flush != NULL) {
         if (pthread_join(flush->worker, NULL) != 0)
             return FASTDB_BUSY;
         maintenance = flush->error;
@@ -326,7 +331,8 @@ FastDBStatus fastdb_close(FastDB *db)
 size_t fdb_memory_bytes(const FastDB *db)
 {
     size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
-    return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes;
+    return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes +
+           fdb_disk_pinned_bytes(db->disk);
 }
 
 FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out)
@@ -364,7 +370,8 @@ FastDBStatus fastdb_flush(FastDB *db)
     if (status == FASTDB_OK)
         status = fdb_disk_compact(db->disk, false, NULL, write_headroom(db));
     if (flush != NULL) {
-        flush->error = status;
+        if (status != FASTDB_BUSY)
+            flush->error = status;
         pthread_cond_broadcast(&flush->condition);
     }
     pthread_mutex_unlock(&db->mutex);
@@ -459,7 +466,27 @@ static void sort_stages(StagedWrite *stages, size_t count)
     }
 }
 
-static FastDBStatus lookup(const FastDB *db, FastDBSlice key, bool copy, FDBLookup *out)
+static FastDBStatus read_tables(FastDB *db, FastDBSlice key, bool copy, bool allow_pin, FDBLookup *out)
+{
+    if (!allow_pin)
+        return fdb_disk_find(db->disk, key, db->sequence, copy, out);
+    FDBDiskRead view;
+    FastDBStatus status = fdb_disk_pin_read(db->disk, key, db->sequence, write_headroom(db), &view);
+    if (status == FASTDB_BUSY)
+        return fdb_disk_find(db->disk, key, db->sequence, copy, out);
+    if (status != FASTDB_OK || view.count == 0)
+        return status;
+
+    pthread_mutex_unlock(&db->mutex);
+    status = fdb_disk_find_pinned(db->disk, &view, key, copy, out);
+    pthread_mutex_lock(&db->mutex);
+    fdb_disk_unpin_read(db->disk, &view);
+    if (db->flush != NULL)
+        pthread_cond_signal(&db->flush->condition);
+    return status;
+}
+
+static FastDBStatus lookup(FastDB *db, FastDBSlice key, bool copy, bool allow_pin, FDBLookup *out)
 {
     *out = (FDBLookup){0};
     if (fdb_disk_poisoned(db->disk))
@@ -472,7 +499,7 @@ static FastDBStatus lookup(const FastDB *db, FastDBSlice key, bool copy, FDBLook
     if (node != NULL)
         status = fdb_lookup_record(&node->record, copy, out);
     else if (fdb_disk_has_tables(db->disk))
-        status = fdb_disk_find(db->disk, key, db->sequence, copy, out);
+        status = read_tables(db, key, copy, allow_pin, out);
     if (status != FASTDB_OK)
         return status;
 
@@ -494,7 +521,7 @@ static FastDBStatus lookup(const FastDB *db, FastDBSlice key, bool copy, FDBLook
     return FASTDB_OK;
 }
 
-static FastDBStatus preflight(const FastDB *db, const Operation *op, size_t *mutations)
+static FastDBStatus preflight(FastDB *db, const Operation *op, size_t *mutations)
 {
     *mutations = 0;
     if (fdb_disk_poisoned(db->disk))
@@ -505,7 +532,7 @@ static FastDBStatus preflight(const FastDB *db, const Operation *op, size_t *mut
             return status;
         if (op->kind == EXPECT) {
             FDBLookup current;
-            status = lookup(db, op->key, false, &current);
+            status = lookup(db, op->key, false, false, &current);
             if (status != FASTDB_OK)
                 return status;
             if (current.revision != op->expected)
@@ -710,7 +737,8 @@ static FastDBStatus commit(FastDB *db, const Operation *op)
     if (status == FASTDB_OK && mutations != 0) {
         FDBBackgroundFlush *flush = db->flush;
         if (flush != NULL && db->tree.bytes >= flush->threshold &&
-            (flush->frozen.count != 0 || flush->error != FASTDB_OK))
+            (flush->frozen.count != 0 || flush->error != FASTDB_OK ||
+             fdb_disk_maintenance_waiting(db->disk)))
             status = flush->error == FASTDB_OK ? FASTDB_BUSY : flush->error;
         else
             status = commit_writes(db, op, mutations);
@@ -766,7 +794,7 @@ FastDBStatus fastdb_get_with_revision(FastDB *db, const void *key, size_t key_si
 
     pthread_mutex_lock(&db->mutex);
     FDBLookup found;
-    status = lookup(db, slice, true, &found);
+    status = lookup(db, slice, true, true, &found);
     if (status == FASTDB_OK && found.revision != 0) {
         *value = found.value;
         *value_size = found.size;
@@ -799,7 +827,7 @@ FastDBStatus fastdb_exists(FastDB *db, const void *key, size_t key_size, bool *e
         return status;
     pthread_mutex_lock(&db->mutex);
     FDBLookup found;
-    status = lookup(db, slice, false, &found);
+    status = lookup(db, slice, false, true, &found);
     *exists = status == FASTDB_OK && found.revision != 0;
     pthread_mutex_unlock(&db->mutex);
     return status;

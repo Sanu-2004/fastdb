@@ -127,7 +127,7 @@ FASTDB_API FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
 FASTDB_API FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options,
                                                                size_t memtable_bytes);
 FASTDB_API FastDBStatus fastdb_open(const FastDBOptions *options, FastDB **out);
-/* Quiesce operations before closing. BUSY leaves the handle open. Other results consume it. */
+/* Quiesce operations before close. BUSY leaves the handle open. Other results consume it. */
 FASTDB_API FastDBStatus fastdb_close(FastDB *db);
 FASTDB_API FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out);
 FASTDB_API FastDBStatus fastdb_flush(FastDB *db);
