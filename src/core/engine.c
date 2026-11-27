@@ -145,6 +145,7 @@ FastDBStatus fastdb_options_create(FastDBOptions **out)
         return FASTDB_OUT_OF_MEMORY;
     (*out)->limits = defaults;
     fastdb_compaction_options_default(&(*out)->compaction);
+    fastdb_group_commit_options_default(&(*out)->group_commit);
     return FASTDB_OK;
 }
 
@@ -204,6 +205,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->arena_chunk_bytes = 0;
         options->block_cache_bytes = 0;
         options->sync_interval_ms = 0;
+        fastdb_group_commit_options_default(&options->group_commit);
         fastdb_compaction_options_default(&options->compaction);
         return FASTDB_OK;
     }
@@ -225,6 +227,8 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         next.storage = *settings;
     if (next.storage.durability != FASTDB_DURABILITY_INTERVAL)
         next.sync_interval_ms = 0;
+    if (next.storage.durability != FASTDB_DURABILITY_GROUP_COMMIT || mode != options->mode)
+        fastdb_group_commit_options_default(&next.group_commit);
     FastDBStatus status = fdb_disk_validate(&next);
     if (status != FASTDB_OK)
         return status;
@@ -240,6 +244,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->arena_chunk_bytes = next.arena_chunk_bytes;
     options->block_cache_bytes = next.block_cache_bytes;
     options->sync_interval_ms = next.sync_interval_ms;
+    options->group_commit = next.group_commit;
     return FASTDB_OK;
 }
 
@@ -249,6 +254,16 @@ FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t mi
         options->storage.durability != FASTDB_DURABILITY_INTERVAL)
         return FASTDB_INVALID_ARGUMENT;
     options->sync_interval_ms = milliseconds;
+    return FASTDB_OK;
+}
+
+FastDBStatus fastdb_options_set_group_commit(FastDBOptions *options,
+                                              const FastDBGroupCommitOptions *settings)
+{
+    if (options == NULL || options->storage.durability != FASTDB_DURABILITY_GROUP_COMMIT ||
+        !fdb_group_commit_valid(settings))
+        return FASTDB_INVALID_ARGUMENT;
+    options->group_commit = *settings;
     return FASTDB_OK;
 }
 
@@ -436,6 +451,7 @@ FastDBStatus fastdb_close(FastDB *db)
     FDBBackgroundFlush *flush = db->flush;
     bool worker_compaction = flush != NULL && flush->compaction_running;
     if (db->iterator_count != 0 || db->snapshot_bytes != 0 ||
+        fdb_group_commit_pending(fdb_disk_group_commit(db->disk)) != 0 ||
         fdb_disk_pinned_bytes(db->disk) != 0 ||
         (fdb_disk_compaction_bytes(db->disk) != 0 && !worker_compaction)) {
         pthread_mutex_unlock(&db->mutex);
@@ -854,7 +870,8 @@ static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique
 }
 
 static FastDBStatus publish_stages(FastDB *db, StagedWrite *stages, size_t count, size_t spare,
-                                    uint64_t sequence, const FDBRecord *journal, size_t frame_bytes)
+                                    uint64_t sequence, const FDBRecord *journal, size_t frame_bytes,
+                                    bool defer_sync)
 {
     sort_stages(stages, count);
     size_t unique = 0;
@@ -867,7 +884,7 @@ static FastDBStatus publish_stages(FastDB *db, StagedWrite *stages, size_t count
     if (status == FASTDB_OK && journal != NULL) {
         status = fdb_disk_maybe_checkpoint(db->disk, &db->tree, frame_bytes);
         if (status == FASTDB_OK)
-            status = fdb_disk_append(db->disk, journal, count);
+            status = fdb_disk_append(db->disk, journal, count, defer_sync);
     }
     Eviction *cache = eviction_state(db);
     uint64_t touch = 0;
@@ -929,7 +946,7 @@ static size_t replay_headroom(void *context)
     return write_headroom(context);
 }
 
-static FastDBStatus commit_writes(FastDB *db, const Operation *op, size_t count)
+static FastDBStatus commit_writes(FastDB *db, const Operation *op, size_t count, bool defer_sync)
 {
     size_t spare = write_headroom(db);
     StagedWrite single, *stages;
@@ -986,7 +1003,8 @@ static FastDBStatus commit_writes(FastDB *db, const Operation *op, size_t count)
         status = fdb_disk_frame_size(db->disk, journal, count, &frame);
     if (status == FASTDB_OK)
         status = frame > spare ? FASTDB_LIMIT_EXCEEDED :
-                 publish_stages(db, stages, count, spare - frame, sequence, journal, frame);
+                 publish_stages(db, stages, count, spare - frame, sequence, journal, frame,
+                                 defer_sync);
     if (journal != &one)
         free(journal);
 cleanup_stages:
@@ -1016,7 +1034,7 @@ static FastDBStatus replay_frame(void *context, const unsigned char *payload, si
         size -= used;
     }
     if (status == FASTDB_OK)
-        status = publish_stages(db, stages, count, spare, first + (count - 1), NULL, 0);
+        status = publish_stages(db, stages, count, spare, first + (count - 1), NULL, 0, false);
     if (count > 1)
         free(stages);
     return status;
@@ -1028,12 +1046,11 @@ static FastDBStatus restore_checkpoint(void *context, const FDBRecord *record)
     if (record->kind != FDB_PUT || fdb_tree_get(&db->tree, record->key) != NULL)
         return FASTDB_CORRUPTION;
     StagedWrite write = {.record = *record};
-    return publish_stages(db, &write, 1, write_headroom(db), record->sequence, NULL, 0);
+    return publish_stages(db, &write, 1, write_headroom(db), record->sequence, NULL, 0, false);
 }
 
-static FastDBStatus commit(FastDB *db, const Operation *op)
+static FastDBStatus commit_locked(FastDB *db, const Operation *op, bool defer_sync)
 {
-    pthread_mutex_lock(&db->mutex);
     size_t mutations;
     FastDBStatus status = preflight(db, op, &mutations);
     if (status == FASTDB_OK && mutations != 0) {
@@ -1043,10 +1060,53 @@ static FastDBStatus commit(FastDB *db, const Operation *op)
              fdb_disk_maintenance_waiting(db->disk)))
             status = flush->error == FASTDB_OK ? FASTDB_BUSY : flush->error;
         else
-            status = commit_writes(db, op, mutations);
+            status = commit_writes(db, op, mutations, defer_sync);
         if (status == FASTDB_OK && flush != NULL)
             pthread_cond_signal(&flush->condition);
     }
+    return status;
+}
+
+void fdb_engine_commit_group(FastDB *db, FDBGroupedWrite *list)
+{
+    pthread_mutex_lock(&db->mutex);
+    uint64_t start = db->sequence;
+    FDBGroupedWrite *first_change = NULL;
+    for (FDBGroupedWrite *write = list; write != NULL; write = write->next) {
+        write->status = commit_locked(db, write->operation, true);
+        if (first_change == NULL && db->sequence != start)
+            first_change = write;
+    }
+    /* Later checks may depend on an earlier provisional write in this group. */
+    if (first_change != NULL && fdb_disk_finish_group(db->disk) != FASTDB_OK) {
+        for (FDBGroupedWrite *write = first_change; write != NULL; write = write->next)
+            write->status = FASTDB_COMMIT_UNCERTAIN;
+    }
+    pthread_mutex_unlock(&db->mutex);
+}
+
+bool fdb_group_commit_valid(const FastDBGroupCommitOptions *options)
+{
+    const size_t smallest = sizeof(FDBGroupedWrite) + sizeof(Operation) + 1;
+    return options != NULL && options->max_pending_requests != 0 &&
+           options->max_pending_bytes >= smallest;
+}
+
+static FastDBStatus commit(FastDB *db, const Operation *op)
+{
+    FDBGroupCommit *group = fdb_disk_group_commit(db->disk);
+    if (group != NULL) {
+        size_t charge = sizeof(FDBGroupedWrite);
+        for (const Operation *entry = op; entry != NULL; entry = entry->next) {
+            if (!fdb_add_size(charge, sizeof(*entry), &charge) ||
+                !fdb_add_size(charge, entry->key.size, &charge) ||
+                !fdb_add_size(charge, entry->value.size, &charge))
+                return FASTDB_LIMIT_EXCEEDED;
+        }
+        return fdb_group_commit_submit(group, op, charge);
+    }
+    pthread_mutex_lock(&db->mutex);
+    FastDBStatus status = commit_locked(db, op, false);
     pthread_mutex_unlock(&db->mutex);
     return status;
 }
@@ -1094,7 +1154,7 @@ FastDBStatus fastdb_purge_expired(FastDB *db, size_t limit, size_t *removed)
                 break;
             }
             const Operation op = {.kind = DELETE, .key = node->record.key};
-            status = commit_writes(db, &op, 1);
+            status = commit_writes(db, &op, 1, false);
             if (status == FASTDB_OK)
                 ++*removed;
         }

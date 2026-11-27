@@ -53,7 +53,8 @@ typedef struct FastDBLimits {
 typedef enum FastDBDurability {
     FASTDB_DURABILITY_SYNC = 0,
     FASTDB_DURABILITY_ASYNC = 1,
-    FASTDB_DURABILITY_INTERVAL = 2
+    FASTDB_DURABILITY_INTERVAL = 2,
+    FASTDB_DURABILITY_GROUP_COMMIT = 3
 } FastDBDurability;
 
 typedef enum FastDBMode {
@@ -85,6 +86,12 @@ typedef struct FastDBPersistentOptions {
     /* Descriptor budget. LSM requires at least 10 and persistent memory at least 5. */
     size_t max_open_files;
 } FastDBPersistentOptions;
+
+typedef struct FastDBGroupCommitOptions {
+    size_t max_pending_requests;
+    size_t max_pending_bytes;
+    uint32_t collection_delay_ms;
+} FastDBGroupCommitOptions;
 
 typedef struct FastDBCompactionOptions {
     bool enabled;
@@ -134,6 +141,7 @@ FASTDB_API void fastdb_free(void *allocation);
 
 FASTDB_API void fastdb_limits_default(FastDBLimits *limits);
 FASTDB_API void fastdb_persistent_options_default(FastDBPersistentOptions *options);
+FASTDB_API void fastdb_group_commit_options_default(FastDBGroupCommitOptions *options);
 FASTDB_API void fastdb_compaction_options_default(FastDBCompactionOptions *options);
 FASTDB_API FastDBStatus fastdb_options_create(FastDBOptions **out);
 FASTDB_API void fastdb_options_destroy(FastDBOptions *options);
@@ -149,6 +157,9 @@ FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastD
                                                    const FastDBPersistentOptions *settings);
 /* Interval durability only. Positive milliseconds, default 100 when unset. */
 FASTDB_API FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t milliseconds);
+/* Group commit only. Zero collection delay processes requests already queued. */
+FASTDB_API FastDBStatus fastdb_options_set_group_commit(FastDBOptions *options,
+                                                        const FastDBGroupCommitOptions *settings);
 /* Set after selecting LSM storage. A zero workspace cap uses available engine memory. */
 FASTDB_API FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
                                                       const FastDBCompactionOptions *settings);

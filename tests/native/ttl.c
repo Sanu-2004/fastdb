@@ -202,10 +202,48 @@ static void purge_partial_error(void)
     remove_disk_fixture(path);
 }
 
+static FDBFsFault fail_sync(void *context, FDBFsOp operation, size_t size)
+{
+    (void)size;
+    bool *fail = context;
+    return (FDBFsFault){.error = operation == FDB_FS_SYNC && *fail ? EIO : 0};
+}
+
+static void grouped_purge_waits_for_sync(void)
+{
+    char path[] = "/tmp/fastdb-group-purge.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options_with_mode(path, FASTDB_MODE_MEMORY_PERSISTENT,
+                                                      FASTDB_DURABILITY_GROUP_COMMIT);
+    bool fail = false;
+    const FDBFs fs = {fail_sync, &fail};
+    FastDB *db;
+    test_clock = (Clock){.now = 100};
+    OK(fdb_open_with_fs(options, &fs, &db));
+    OK(fastdb_put_with_ttl(db, "a", 1, "A", 1, 10));
+    test_clock.now = 110;
+    fail = true;
+    size_t removed;
+    STATUS(fastdb_purge_expired(db, 1, &removed), FASTDB_COMMIT_UNCERTAIN);
+    CHECK(removed == 0);
+    STATUS(fastdb_close(db), FASTDB_COMMIT_UNCERTAIN);
+
+    test_clock.now = 109;
+    OK(fastdb_open(options, &db));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    FastDBStats stats;
+    OK(fastdb_stats(db, &stats));
+    CHECK(stats.revision == 2);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     boundary_purge_and_clock_errors();
     durable_ttl(FASTDB_MODE_MEMORY_PERSISTENT);
     durable_ttl(FASTDB_MODE_LSM);
     purge_partial_error();
+    grouped_purge_waits_for_sync();
 }

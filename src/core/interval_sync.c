@@ -1,8 +1,8 @@
 #include "interval_sync.h"
+#include "monotonic.h"
 
 #include <errno.h>
 #include <stdlib.h>
-#include <time.h>
 
 struct FDBIntervalSync {
     FDBWalSet *wal;
@@ -18,27 +18,10 @@ size_t fdb_interval_sync_workspace(void)
     return sizeof(FDBIntervalSync);
 }
 
-static bool monotonic_deadline(uint32_t milliseconds, struct timespec *deadline)
-{
-    if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0 || deadline->tv_sec < 0)
-        return false;
-    const long billion = 1000000000L;
-    long nanoseconds = deadline->tv_nsec + (long)(milliseconds % 1000U) * 1000000L;
-    uint64_t seconds = (uint64_t)(milliseconds / 1000U) + (uint64_t)(nanoseconds / billion);
-    if (seconds > INT64_MAX - (uint64_t)deadline->tv_sec)
-        return false;
-    seconds += (uint64_t)deadline->tv_sec;
-    time_t converted = (time_t)seconds;
-    if (converted < 0 || (uint64_t)converted != seconds)
-        return false;
-    *deadline = (struct timespec){.tv_sec = converted, .tv_nsec = nanoseconds % billion};
-    return true;
-}
-
 static bool wait_for_deadline(FDBIntervalSync *worker)
 {
     struct timespec deadline;
-    if (!monotonic_deadline(worker->milliseconds, &deadline)) {
+    if (!fdb_monotonic_deadline(worker->milliseconds, &deadline)) {
         worker->wal->poisoned = true;
         return false;
     }
@@ -66,19 +49,6 @@ static void *sync_worker(void *arg)
     return NULL;
 }
 
-static int init_monotonic_condition(pthread_cond_t *condition)
-{
-    pthread_condattr_t attributes;
-    int error = pthread_condattr_init(&attributes);
-    if (error != 0)
-        return error;
-    error = pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
-    if (error == 0)
-        error = pthread_cond_init(condition, &attributes);
-    pthread_condattr_destroy(&attributes);
-    return error;
-}
-
 FastDBStatus fdb_interval_sync_start(FDBWalSet *wal, pthread_mutex_t *mutex, uint32_t milliseconds,
                                      FDBIntervalSync **out)
 {
@@ -86,7 +56,7 @@ FastDBStatus fdb_interval_sync_start(FDBWalSet *wal, pthread_mutex_t *mutex, uin
     if (worker == NULL)
         return FASTDB_OUT_OF_MEMORY;
     *worker = (FDBIntervalSync){.wal = wal, .mutex = mutex, .milliseconds = milliseconds};
-    int error = init_monotonic_condition(&worker->wake);
+    int error = fdb_monotonic_condition_init(&worker->wake);
     if (error == 0) {
         error = pthread_create(&worker->thread, NULL, sync_worker, worker);
         if (error != 0)

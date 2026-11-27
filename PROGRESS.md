@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-27\
-**Last verified base commit / branch:** `7d84d05` / `main`. V076 verifies interval durability in P4.3.
+**Last verified base commit / branch:** `2836a4c` / `main`. V077 verifies completed P4.3.
 **Current milestone:** P4 — performance and configuration hardening.\
-**Next task:** P4.3 — bounded group commit with durable acknowledgements.
+**Next task:** P4.4 — partitioned SSTable indexes and filters.
 
 ## 1. How to use this file
 
@@ -77,7 +77,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | ID | Task and minimum exit criterion | Status | Evidence / next action |
 |---|---|---|---|
 | P2.1 | Filesystem abstraction with robust I/O, 64-bit offsets, sync/rename, exclusive directory lock, failpoints. | DONE | V003–V005; relative file opens after exclusive lock, 64-bit offsets, short I/O, EINTR, ENOSPC, sync/rename and fault injection. |
-| P2.2 | Versioned binary WAL/batch frames, CRC, rotation, persistent IDs, all configured sync policies (group commit may finish P4.3). | DONE | V016–V018; public writes stage and sync or asynchronously append complete frames. Bounded rotation and reopen verified. Interval and group commit are tracked in P4.3. |
+| P2.2 | Versioned binary WAL/batch frames, CRC, rotation, persistent IDs, all configured sync policies (group commit may finish P4.3). | DONE | V016–V018 verify frames, rotation and reopen. V076–V077 verify interval and group commit. |
 | P2.3 | Durable manifest/CURRENT and atomic version edits, high-water IDs/sequences, manifest rotation. | DONE | V008–V011; checksummed bounded MANIFEST snapshot, atomic generation replacement, monotonic file reservation, high-waters and uncertainty tests. ADR 0002. |
 | P2.4 | SSTable block format and writer: sorted records, offset array, checksums, metadata/footer and bounds. | DONE | V008–V010; bounded SSTable writer, sorted admission, large records, checksummed blocks, offset arrays, properties, footer and sync failure. |
 | P2.5 | SSTable reader/iterator/seek/status, corruption-safe binary search and multi-version block handling. | DONE | V008–V010; positional reader, verify/seek/iteration, cross-block versions, checked offsets and corruption versus EOF. |
@@ -114,7 +114,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 |---|---|---|---|
 | P4.1 | Optional arena allocator with real allocation accounting, bounded history and safe lifetime. | DONE | V074 verifies the opt-in LSM arena, charged chunk capacity, allocation and admission rollback, snapshot lifetime, arena retention across a failed frozen flush, and two-WAL recovery after SIGKILL. Full profiles passed 26/26 each and TSan passed 20 executions. |
 | P4.2 | Thread-safe bounded LRU block cache, file ID/offset keys, pinned-block lifetime, metrics. | DONE | V075 verifies the opt-in per-database cache, byte cap, LRU eviction, iterator pins, fault bypass, corruption rejection, file-ID isolation through compaction, concurrent hits and stats. See [ADR 0010](docs/adr/0010-bounded-sstable-block-cache.md). |
-| P4.3 | Group commit and interval sync worker; durable ACK ordering and sync-failure tests. | IN_PROGRESS | V076 verifies interval sync in both persistent modes, monotonic scheduling, clean-close sync, WAL rotation and failure propagation. Grouped acknowledgement ordering, bounded admission and sync-failure coverage remain open. |
+| P4.3 | Group commit and interval sync worker; durable ACK ordering and sync-failure tests. | DONE | V076 verifies interval sync. V077 verifies one group sync for concurrent PUT/CAS/batch in both persistent modes, no early acknowledgement or live visibility, bounded count and bytes, rotation, failure outcomes, expiry purge and process-kill recovery. |
 | P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | TODO | — |
 | P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | TODO | — |
 | P4.6 | Size-tiered compaction and validated storage profiles; consistent search semantics across overlapping runs. | TODO | — |
@@ -198,14 +198,14 @@ Gate status is independent of individual task status. PASS requires actual recor
 |---|---|---|---|
 | G01 | Reproducible GCC + Clang build, C API/CLI and warnings check | PASS | V023, V041 |
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021. V074 revalidates the 512-byte memory fixture after adding the LSM allocator. |
-| G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021. V076 revalidates WAL reopen and revisions with interval durability. |
+| G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021. V076–V077 revalidate WAL reopen and revisions with interval and group commit. |
 | G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021 and V075. Cached and uncached read paths preserve file identity and reject corrupt cold blocks. |
 | G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | PASS | V067–V068 cover complete batches, CAS, memory and LSM snapshots, merged scans and concurrent snapshot/maintenance fixtures. Release stress remains in G08/G09. |
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | V073 covers a deterministic multilevel merge larger than the engine budget. P8.3 tracks release-scale concurrent stress, RSS and FD measurements. |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V076 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V077 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -299,6 +299,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V074 | 2026-11-27 / P4.1 LSM arena based on `6d16f88` | Test-first GCC Debug build, focused memory/LSM/allocation/worker tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS after fix | Test-first build found the missing API. Initial integrated profiles found a memory-only handle-size regression. Moved persistent accounting into disk state and preserved the memory handle charge. Final tests cover chunk reuse and rollback, flush retry, snapshot copies, two-WAL crash/replay, and reopen with arena disabled. Focused 1/1 per target, full 26/26 per profile, TSan 20 executions. |
 | V075 | 2026-11-27 / P4.2 block cache based on `85b18ce` | GCC Debug baseline and test-first build, focused cache/SSTable/read-view targets, GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 26/26. New tests failed to compile before the API existed. Final tests verified cold disk errors, no data-block read on warm GET or scan, iterator pins under eviction pressure, shared-cache concurrency, byte limits, database isolation, history through compaction, and cold reopen. All full profiles passed 27/27 each and TSan passed 20 executions. |
 | V076 | 2026-11-27 / P4.3 interval sync based on `7d84d05` | GCC Debug test-first build, focused interval repeats, WAL/set and LSM fault tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Test-first build found the missing policy. Verified default and custom deadlines, acknowledgement before the worker sync, `COMMIT_UNCERTAIN` propagation, pending sync during close, and rotation before the worker ticks. Final interval test passed 10 executions, each full profile passed 28/28 and TSan passed 25 executions. |
+| V077 | 2026-11-27 / P4.3 group commit based on `2836a4c` | GCC Debug baseline/test-first build, focused group/interval/TTL targets, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 28/28. Corrected fixture include path and moved its sync gate past startup directory sync. Group success, uncertain outcomes, caps, WAL rotation, acknowledged SIGKILL recovery and purge sync passed. Group target passed 10 executions, all full profiles passed 29/29 each, and TSan passed 30 executions. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -323,7 +324,7 @@ For stress/fuzz/benchmarks, log seed, operation counts, workload, duration, data
 |---|---|---|
 | D001 | C17 engine; Go/cgo REST/document layer; React/TypeScript Studio | Accepted architecture. C17 memory mode verified; remaining layers follow the milestone dependencies. |
 | D002 | New versioned binary SSTable/WAL/manifest formats; legacy files untouched | Accepted. Segment, manifest, table and Bloom formats verified through public persistence and component tests. Legacy inputs use the separate guarded exporter. |
-| D003 | Three independent storage modes; safe persistent defaults and explicit memory eviction | Three modes verified through public native and CLI entry points. Sync is the persistent default. V076 adds opt-in interval durability through the native API. Group commit remains in P4.3. |
+| D003 | Three independent storage modes; safe persistent defaults and explicit memory eviction | Three modes verified through public native and CLI entry points. Sync is the persistent default. V076–V077 add opt-in interval durability and group commit through the native API. |
 | D004 | Leveled compaction first with sequence-based visibility | V026–V028 verify promotion, overlap closure, publication and recovery. V071 reclaims shadowed PUTs. V072 reclaims eligible bottom-level DELETE-led groups. The reclamation proof is in [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
 | D005 | Left-leaning red-black tree, one allocation per node, immutable bounded page copies | Accepted in [ADR 0001](docs/adr/0001-native-memory-tree.md). V003–V005. |
 | D006 | Complete atomic MANIFEST snapshots plus durable reservations before file creation | Accepted in [ADR 0002](docs/adr/0002-atomic-manifest.md). V008–V011. |
@@ -604,14 +605,20 @@ These are deliberate boundaries, not completed features:
 - Added one event-driven worker that uses a monotonic deadline and the existing engine mutex and active WAL descriptor. Appends acknowledge after writing the complete frame. Rotation still syncs before sealing. Close wakes and joins the worker before syncing pending frames. Worker sync failure poisons the handle. Documented the best-effort interval and existing mutex contention during sync.
 - V076 passed the final focused target ten times. The WAL and WAL-set targets passed 2/2 and the LSM fault target passed 1/1 in the focused build. Final GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release passed 28/28 each. TSan passed five targets five times each. P4.3 remains IN_PROGRESS for group commit.
 
+### Session 030 — 2026-11-27 — Complete P4.3 group commit
+
+- Started at pushed `2836a4c`. GCC Debug passed 28/28 before changes. Added the group fixture first. Its first build exposed a missing test include path, and the corrected build stopped on the absent group implementation. The first focused execution reached the CTest timeout because the gate intercepted startup directory sync. Arming it after open isolated the intended WAL barrier.
+- Added a worker with FIFO request and byte admission. It applies existing per-request WAL frames under the engine mutex through sync. It returns uncertain outcomes for requests that depended on an unsynced provisional write. Existing rotation and checkpoint rules still apply, and TTL purge uses direct synchronous deletion to preserve its confirmed count.
+- V077 passed group, interval and TTL tests, the 29-test GCC Debug, Clang Release, sanitizer and Docker Release suites, and 30 TSan concurrency executions. P4.3 is DONE. Throughput measurements and power-loss tests remain open.
+
 ## 9. Current handoff
 
 - **Current milestone:** P4 — performance and configuration hardening.
-- **Next task ID:** P4.3.
-- **Next action:** Implement bounded group commit with durable acknowledgements for concurrent persistent writers.
-- **Next commands:** Add a gated `FDB_FS_SYNC` test with multiple queued PUT/CAS/batch callers. Verify exact sync count on one WAL, no early acknowledgement, consistent conditions, failure outcomes, and recovery when a group crosses a segment boundary. Inspect `commit`, `commit_writes`, and `fastdb_purge_expired` in `src/core/engine.c` and `fdb_disk_append`/`fdb_wal_set_sync` for paths that need durable acknowledgement. Reserve bounded queue state, keep provisional nodes unobservable until the group's sync succeeds, and report poisoned outcomes explicitly. Run the focused interval, WAL and LSM fault targets and the V076 matrix.
-- **Last verified good checkpoint:** V076 interval durability based on `7d84d05`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the failing test-first build and final passes.
-- **Working-tree state:** V076 includes native interval policy, worker, tests and configuration docs. Confirm with `git status --short --branch`.
+- **Next task ID:** P4.4.
+- **Next action:** Remove the flat per-SSTable metadata limit through bounded index/filter partitions with backward-compatible reads.
+- **Next commands:** Add a fixture in `tests/native/sstable_writer.c` and `tests/native/sstable_reader.c` where total index/filter metadata exceeds one configured working partition. Inspect `room_for_row`, `finish_image`, `parse_index`, and `block_bound`. Use a versioned file representation, retain v1 reads, and enforce checked bounds and checksums for the metadata directory and every loaded partition. Test seek across a partition boundary, multi-version keys crossing partitions, corrupt offsets/filters, mixed-format compaction, and large table recovery. Run focused SSTable/merge/recovery targets before the V077 matrix.
+- **Last verified good checkpoint:** V077 group commit based on `2836a4c`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the corrected fixture and final passes.
+- **Working-tree state:** V077 includes bounded group commit, native API, tests and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, power-loss tests and release-scale verification remain open.
 

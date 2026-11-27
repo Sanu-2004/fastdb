@@ -27,3 +27,19 @@ Successful sync clears the dirty marker. Recovery treats a replayed
 active segment as potentially dirty unless recovery has already synced a
 tail repair. A sync failure uses the WAL set's existing poisoned state.
 Clean close joins the worker before the last sync and descriptor close.
+
+## Bounded group commit
+
+One worker accepts a bounded FIFO of borrowed caller requests. A monotonic
+collection window allows concurrent requests to share a sync. A separate
+queue mutex protects admission and result collection. The worker releases
+that mutex before applying the group under the database mutex. All normal
+operation checks, per-request staging limits, WAL rotation and checkpoint
+rules still apply.
+
+The database mutex excludes observers through the final sync. Conditional
+requests see preceding provisional writes while the worker owns the mutex.
+A failed durability check poisons the database and marks the provisional
+suffix uncertain, including dependent condition outcomes. This preserves
+independent atomic WAL frames and the existing file format. It also keeps
+storage and descriptor lifetimes unchanged during the barrier.

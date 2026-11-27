@@ -12,6 +12,7 @@ struct FDBDisk {
     size_t compaction_bytes;
     FDBBlockCache *block_cache;
     FDBIntervalSync *interval_sync;
+    FDBGroupCommit *group_commit;
     size_t arena_chunk_bytes;
     size_t active_key_bytes;
     size_t frozen_key_bytes;
@@ -92,7 +93,8 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 10 : 5;
     if ((storage->durability != FASTDB_DURABILITY_SYNC &&
          storage->durability != FASTDB_DURABILITY_ASYNC &&
-         storage->durability != FASTDB_DURABILITY_INTERVAL) ||
+         storage->durability != FASTDB_DURABILITY_INTERVAL &&
+         storage->durability != FASTDB_DURABILITY_GROUP_COMMIT) ||
         (storage->durability != FASTDB_DURABILITY_INTERVAL && options->sync_interval_ms != 0) ||
         storage->max_catalog_files < 2 ||
         storage->max_open_files < minimum_open_files ||
@@ -165,6 +167,10 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
         return FASTDB_INVALID_ARGUMENT;
     if (storage->durability == FASTDB_DURABILITY_INTERVAL &&
         !fdb_add_size(*workspace, fdb_interval_sync_workspace(), workspace))
+        return FASTDB_INVALID_ARGUMENT;
+    if (storage->durability == FASTDB_DURABILITY_GROUP_COMMIT &&
+        (!fdb_group_commit_valid(&options->group_commit) ||
+         !fdb_add_size(*workspace, fdb_group_commit_workspace(), workspace)))
         return FASTDB_INVALID_ARGUMENT;
     size_t smallest_node;
     size_t available = limits->max_memory_bytes - sizeof(FastDB);
@@ -286,6 +292,10 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
         status = fdb_interval_sync_start(&disk->log, &db->mutex, interval, &disk->interval_sync);
         if (status != FASTDB_OK)
             (void)fdb_wal_set_close(&disk->log);
+    } else if (status == FASTDB_OK && disk->durability == FASTDB_DURABILITY_GROUP_COMMIT) {
+        status = fdb_group_commit_start(db, &options->group_commit, &disk->group_commit);
+        if (status != FASTDB_OK)
+            (void)fdb_wal_set_close(&disk->log);
     }
     if (status != FASTDB_OK) {
         db->disk = NULL;
@@ -300,7 +310,10 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
 
 FastDBStatus fdb_disk_stop_sync_worker(FDBDisk *disk)
 {
-    return disk == NULL ? FASTDB_OK : fdb_interval_sync_stop(&disk->interval_sync);
+    if (disk == NULL)
+        return FASTDB_OK;
+    return disk->group_commit == NULL ? fdb_interval_sync_stop(&disk->interval_sync) :
+                                        fdb_group_commit_stop(&disk->group_commit);
 }
 
 FastDBStatus fdb_disk_close(FDBDisk *disk)
@@ -329,6 +342,18 @@ bool fdb_disk_poisoned(const FDBDisk *disk)
 bool fdb_disk_has_tables(const FDBDisk *disk)
 {
     return disk != NULL && disk->mode == FASTDB_MODE_LSM;
+}
+
+FDBGroupCommit *fdb_disk_group_commit(const FDBDisk *disk)
+{
+    return disk == NULL ? NULL : disk->group_commit;
+}
+
+FastDBStatus fdb_disk_finish_group(FDBDisk *disk)
+{
+    if (disk->log.poisoned)
+        return FASTDB_COMMIT_UNCERTAIN;
+    return disk->log.wal.dirty ? fdb_wal_set_sync(&disk->log) : FASTDB_OK;
 }
 
 void fdb_disk_cache_stats(const FDBDisk *disk, FastDBBlockCacheStats *out)
@@ -404,7 +429,7 @@ static FastDBStatus estimate_tree_file_bytes(const FDBDisk *disk, const FDBTree 
     return FASTDB_OK;
 }
 
-FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count)
+FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count, bool defer_sync)
 {
     size_t frame_bytes;
     FastDBStatus status = fdb_wal_frame_size(&disk->log.wal, records, count, &frame_bytes);
@@ -421,7 +446,9 @@ FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t cou
         status = check_free_space(disk, reservation);
     if (status != FASTDB_OK)
         return status;
-    status = fdb_wal_set_append(&disk->log, records, count, disk->durability == FASTDB_DURABILITY_SYNC);
+    bool force_sync = disk->durability == FASTDB_DURABILITY_SYNC ||
+                      (disk->durability == FASTDB_DURABILITY_GROUP_COMMIT && !defer_sync);
+    status = fdb_wal_set_append(&disk->log, records, count, force_sync);
     if (status == FASTDB_OK)
         fdb_interval_sync_notify(disk->interval_sync);
     return status;

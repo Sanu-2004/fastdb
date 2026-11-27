@@ -10,6 +10,7 @@ struct FastDBOptions {
     FastDBMode mode;
     char *path;
     FastDBPersistentOptions storage;
+    FastDBGroupCommitOptions group_commit;
     FastDBCompactionOptions compaction;
     size_t flush_threshold;
     size_t arena_chunk_bytes;

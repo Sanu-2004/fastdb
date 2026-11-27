@@ -35,7 +35,7 @@ endif()
 
 add_library(fastdb_objects OBJECT
     src/core/disk.c src/core/engine.c src/core/memtable.c src/core/record.c src/core/scan.c
-    src/core/snapshot.c src/core/interval_sync.c
+    src/core/snapshot.c src/core/group_commit.c src/core/interval_sync.c src/core/monotonic.c
     src/storage/block_cache.c src/storage/bloom.c src/storage/compaction.c
     src/storage/compaction_plan.c src/storage/crc32c.c
     src/storage/flush.c src/storage/fs.c

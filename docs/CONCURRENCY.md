@@ -139,6 +139,19 @@ worker waits and held during the filesystem sync. Close wakes and joins
 the worker before freeing storage and completes any pending sync. A
 background sync error poisons the handle under the same mutex.
 
+Group commit uses a per-database worker and a separate queue mutex. The
+queue borrows operation buffers from waiting callers, who keep them valid
+until the API returns. The worker detaches queued requests and releases
+the queue mutex before taking the database mutex. It applies requests in
+queue order and holds the database mutex through the final WAL sync.
+Conditions see preceding requests in the group. Live reads and snapshot
+capture cannot see provisional changes. After the durability check the
+worker releases the database mutex, then publishes results under the
+queue mutex. Capacity includes requests being processed and completed
+requests whose callers have yet to collect the result. Close returns
+`FASTDB_BUSY` while requests remain pending. The caller must quiesce new
+operations before final close.
+
 When the optional flush worker publishes an L0 table, it queues one automatic
 compaction on the same per-database worker. The worker tracks flush and
 compaction errors separately: a failed compaction does not mark a successfully

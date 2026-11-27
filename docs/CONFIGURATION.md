@@ -136,7 +136,7 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 
 | Persistent setting | Default | Scope |
 |---|---:|---|
-| `durability` | sync | WAL acknowledgement policy. Supported persistent policies are sync, async, and interval. |
+| `durability` | sync | WAL acknowledgement policy. Supported persistent policies are sync, async, interval, and group commit. |
 | `max_wal_segment_bytes` | 64 MiB | One WAL segment, including header |
 | `max_wal_frame_bytes` | 32 MiB | One atomic WAL frame, including header |
 | `target_block_bytes` | 16 KiB | Target SSTable or checkpoint block size |
@@ -155,6 +155,25 @@ one WAL sync worker. `fastdb_options_set_wal_interval` accepts a positive
 interval is 100 ms and changes apply on reopen. Interval acknowledgements
 follow WAL writes, with later sync on a monotonic deadline. See
 [durability](DURABILITY.md) for the failure and scheduling contract.
+
+Select `FASTDB_DURABILITY_GROUP_COMMIT` for either persistent mode to
+start a dedicated worker. Override its defaults using
+`fastdb_options_set_group_commit` before opening the database. Settings
+apply on reopen.
+
+| Group commit setting | Default | Scope |
+|---|---:|---|
+| `max_pending_requests` | 16 | Requests admitted across the queue, active group, and results awaiting collection |
+| `max_pending_bytes` | 64 MiB | Request metadata and borrowed key and value bytes across those requests |
+| `collection_delay_ms` | 1 | Monotonic collection delay after the worker observes work. Zero processes the current queue immediately. |
+
+The request and byte limits must allow at least one mutation. A request
+larger than the byte cap returns `FASTDB_LIMIT_EXCEEDED`. An admissible
+request that would fill beyond either limit returns `FASTDB_BUSY` before
+committing. The queue's fixed worker state counts toward engine memory.
+Its byte cap also bounds borrowed caller inputs, which are already owned
+by the caller. The collection delay excludes I/O, lock acquisition, and
+time behind earlier groups. Sync still holds the database mutex.
 
 Persistent memory needs five slots during WAL rotation for the directory,
 lock, current WAL, replacement WAL, and temporary manifest. Increase any

@@ -1263,6 +1263,59 @@ passed 2/2 and LSM fault passed 1/1. Each full profile passed 28/28,
 including the Release tests in `docker build -t fastdb-native:local .`.
 The V062 TSan workaround passed five concurrency targets five times each.
 
+## P4.3 bounded group commit (V077)
+
+At `2836a4c`, all 28 GCC Debug baseline tests passed. The new fixture
+first exposed a missing test include path, then failed to compile with
+the group implementation absent. The initial implementation run reached
+the CTest timeout because the gate intercepted startup directory sync.
+Arming the gate after recovery isolated the intended WAL sync.
+
+The final group fixture placed a PUT, dependent CAS, and dependent
+atomic batch on one WAL in each persistent mode and observed one sync.
+While sync was blocked, none of the callers had acknowledged, the engine
+mutex still excluded live readers, and the queue rejected another writer.
+Separate cases covered byte-cap admission, a no-sync failed condition,
+rotation through a group, and recovery after killing the child after both
+writers acknowledged. An injected sync failure protected the provisional
+suffix, including a condition evaluated after its first provisional write.
+The expired-key purge fixture verified that an uncertain deletion does not
+increment the confirmed deletion count.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p43-group-base -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-group-base --parallel 6
+ctest --test-dir /tmp/p43-group-base --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-group-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-group-red --target fastdb_group_commit --parallel 6
+CC=gcc cmake -S /repo -B /tmp/p43-group-green -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-group-green --parallel 6
+ctest --test-dir /tmp/p43-group-green -R '^fastdb_group_commit$' --output-on-failure
+ctest --test-dir /tmp/p43-group-green -R '^fastdb_interval_sync$' --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-group-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-group-gcc --parallel 6
+ctest --test-dir /tmp/p43-group-gcc -R '^fastdb_group_commit$' --repeat until-fail:10 --output-on-failure
+ctest --test-dir /tmp/p43-group-gcc -R '^fastdb_ttl$' --output-on-failure
+ctest --test-dir /tmp/p43-group-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p43-group-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p43-group-clang --parallel 6
+ctest --test-dir /tmp/p43-group-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-group-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p43-group-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p43-group-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-group-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p43-group-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p43-group-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The final group target passed ten consecutive executions. TTL passed 1/1.
+Each full profile passed 29/29, including `docker build -t
+fastdb-native:local .`. All six TSan concurrency targets passed five
+executions each with the V062 workaround. The process-kill and injected
+sync cases exercise recovery on the test filesystem.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

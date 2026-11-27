@@ -3,6 +3,7 @@
 
 #include "engine.h"
 #include "flush.h"
+#include "group_commit.h"
 #include "storage/sstable.h"
 #include "wal.h"
 
@@ -42,6 +43,8 @@ FastDBStatus fdb_disk_stop_sync_worker(FDBDisk *disk);
 FastDBStatus fdb_disk_close(FDBDisk *disk);
 bool fdb_disk_poisoned(const FDBDisk *disk);
 bool fdb_disk_has_tables(const FDBDisk *disk);
+FDBGroupCommit *fdb_disk_group_commit(const FDBDisk *disk);
+FastDBStatus fdb_disk_finish_group(FDBDisk *disk);
 void fdb_disk_cache_stats(const FDBDisk *disk, FastDBBlockCacheStats *out);
 size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk);
 size_t fdb_disk_memtable_key_bytes(const FDBDisk *disk, bool frozen);
@@ -49,7 +52,7 @@ void fdb_disk_set_active_key_bytes(FDBDisk *disk, size_t bytes);
 bool fdb_disk_tree_fits(const FDBDisk *disk, size_t keys, size_t key_bytes);
 FastDBStatus fdb_disk_frame_size(const FDBDisk *disk, const FDBRecord *records,
                                  size_t count, size_t *bytes);
-FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count);
+FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t count, bool defer_sync);
 FastDBStatus fdb_disk_find(const FDBDisk *disk, FastDBSlice key, uint64_t sequence,
                            bool copy, FDBLookup *out);
 const FDBManifest *fdb_disk_catalog(const FDBDisk *disk);

@@ -27,8 +27,9 @@ untrusted parent paths and network-filesystem durability remain outside the
 current implementation.
 
 The WAL segment writer syncs the new file and directory before making the
-segment available. A synchronous append acknowledges after successful file
-sync. Async and interval append acknowledge once the whole frame is
+segment available. Sync and group commit acknowledge only after the
+required file sync and catalog operations succeed. Async and interval
+append acknowledge once the whole frame is
 written. Either policy can lose recent data if the system fails before
 sync. With interval durability, one worker uses a monotonic deadline when
 it sees unsynced frames and syncs the active WAL when the deadline expires.
@@ -44,8 +45,19 @@ commit or manifest outcome becomes uncertain. Close releases the handle.
 Reopen to determine whether the mutation is present. A failed interval
 worker sync causes subsequent reads, writes, and close to return
 `FASTDB_COMMIT_UNCERTAIN`. Clean close joins the worker and syncs pending
-frames. Async close also syncs and reports errors. Group commit remains
-pending.
+frames. Async close also syncs and reports errors.
+
+Group commit appends each successful mutation request as its own WAL frame.
+All requests in a group wait for the same final durability check. Rotation
+can require additional syncs, and automatic checkpointing can make a
+prefix durable before the rest of the group. A failed sync poisons the
+handle and returns `FASTDB_COMMIT_UNCERTAIN` for the first provisional
+mutation and every later request in that group, including conditions that
+may have observed it. A crash before acknowledgement can leave some whole
+frames present. Each native batch remains atomic in recovery. Persistent
+memory's explicit expiry purge uses one synchronous append per deletion
+under group commit, so its confirmed deletion count excludes uncertain
+deletions.
 
 Persistent options can set `min_free_bytes` as an advisory free-space
 headroom floor. Before WAL append, FastDB checks `statvfs` available bytes
