@@ -12,6 +12,8 @@ struct FastDBOptions {
     FastDBPersistentOptions storage;
     FastDBCompactionOptions compaction;
     size_t flush_threshold;
+    FastDBEvictionPolicy eviction_policy;
+    size_t max_live_bytes;
 };
 
 typedef struct FDBDisk FDBDisk;
@@ -41,7 +43,7 @@ struct FastDB {
     size_t iterator_count;
     size_t snapshot_bytes;
     FDBDisk *disk;
-    size_t disk_budget;
+    size_t reserved_bytes; /* Persistent workspace or the optional memory cache state. */
     FDBBackgroundFlush *flush;
 };
 

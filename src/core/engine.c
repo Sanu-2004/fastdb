@@ -36,6 +36,49 @@ typedef struct StagedWrite {
     FDBNode *node;
 } StagedWrite;
 
+typedef struct Eviction {
+    FastDBEvictionPolicy policy;
+    size_t limit;
+    uint64_t tick;
+} Eviction;
+
+typedef struct EvictionRecord {
+    uint64_t inserted;
+    uint64_t touched;
+    uint64_t hits;
+} EvictionRecord;
+
+_Static_assert(_Alignof(FastDB) >= _Alignof(Eviction), "cache state alignment");
+
+static bool eviction_enabled(const FastDB *db)
+{
+    return db->disk == NULL && db->reserved_bytes == sizeof(Eviction);
+}
+
+static Eviction *eviction_state(FastDB *db)
+{
+    return eviction_enabled(db) ? (Eviction *)(db + 1) : NULL;
+}
+
+static size_t live_tree_bytes(const FastDB *db)
+{
+    size_t metadata = eviction_enabled(db) ? db->tree.count * sizeof(EvictionRecord) : 0;
+    return db->tree.bytes + metadata;
+}
+
+static bool valid_eviction(const FastDBOptions *options)
+{
+    if (options->eviction_policy == FASTDB_EVICTION_NONE)
+        return options->max_live_bytes == 0;
+    const size_t base = sizeof(FastDB) + sizeof(Eviction);
+    return options->eviction_policy >= FASTDB_EVICTION_FIFO &&
+           options->eviction_policy <= FASTDB_EVICTION_LFU &&
+           options->mode == FASTDB_MODE_MEMORY && options->path == NULL &&
+           options->limits.max_memory_bytes >= base &&
+           options->max_live_bytes >= sizeof(FDBNode) + 1 + sizeof(EvictionRecord) &&
+           options->max_live_bytes <= options->limits.max_memory_bytes - base;
+}
+
 static FastDBStatus replay_frame(void *context, const unsigned char *payload, size_t size,
                                   size_t count, uint64_t first);
 static size_t replay_headroom(void *context);
@@ -119,9 +162,24 @@ FastDBStatus fastdb_options_set_limits(FastDBOptions *options, const FastDBLimit
         return FASTDB_INVALID_ARGUMENT;
     FastDBOptions next = *options;
     next.limits = *limits;
-    if (next.path != NULL && fdb_disk_validate(&next) != FASTDB_OK)
+    if (!valid_eviction(&next) || (next.path != NULL && fdb_disk_validate(&next) != FASTDB_OK))
         return FASTDB_INVALID_ARGUMENT;
     options->limits = *limits;
+    return FASTDB_OK;
+}
+
+FastDBStatus fastdb_options_set_eviction(FastDBOptions *options, FastDBEvictionPolicy policy,
+                                          size_t max_live_bytes)
+{
+    if (options == NULL)
+        return FASTDB_INVALID_ARGUMENT;
+    FastDBOptions next = *options;
+    next.eviction_policy = policy;
+    next.max_live_bytes = max_live_bytes;
+    if (!valid_eviction(&next))
+        return FASTDB_INVALID_ARGUMENT;
+    options->eviction_policy = policy;
+    options->max_live_bytes = max_live_bytes;
     return FASTDB_OK;
 }
 
@@ -142,7 +200,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         return FASTDB_OK;
     }
     if ((mode != FASTDB_MODE_MEMORY_PERSISTENT && mode != FASTDB_MODE_LSM) ||
-        path == NULL || *path == '\0')
+        path == NULL || *path == '\0' || options->eviction_policy != FASTDB_EVICTION_NONE)
         return FASTDB_INVALID_ARGUMENT;
     FastDBOptions next = *options;
     next.mode = mode;
@@ -279,10 +337,19 @@ FastDBStatus fdb_open_with_fs(const FastDBOptions *options, const FDBFs *fs, Fas
     if (out == NULL)
         return FASTDB_INVALID_ARGUMENT;
     *out = NULL;
-    FastDB *db = calloc(1, sizeof(*db));
+    if (options != NULL && !valid_eviction(options))
+        return FASTDB_INVALID_ARGUMENT;
+    size_t tail = options != NULL && options->eviction_policy != FASTDB_EVICTION_NONE ?
+                  sizeof(Eviction) : 0;
+    FastDB *db = calloc(1, sizeof(*db) + tail);
     if (db == NULL)
         return FASTDB_OUT_OF_MEMORY;
     db->limits = options == NULL ? defaults : options->limits;
+    if (tail != 0) {
+        db->reserved_bytes = tail;
+        *eviction_state(db) = (Eviction){.policy = options->eviction_policy,
+                                        .limit = options->max_live_bytes};
+    }
     int error = pthread_mutex_init(&db->mutex, NULL);
     if (error != 0) {
         free(db);
@@ -351,7 +418,7 @@ FastDBStatus fastdb_close(FastDB *db)
 size_t fdb_memory_bytes(const FastDB *db)
 {
     size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
-    return sizeof(*db) + db->tree.bytes + frozen_bytes + db->iterator_bytes + db->snapshot_bytes +
+    return sizeof(*db) + live_tree_bytes(db) + frozen_bytes + db->iterator_bytes + db->snapshot_bytes +
            fdb_disk_pinned_bytes(db->disk) + fdb_disk_compaction_bytes(db->disk);
 }
 
@@ -364,7 +431,7 @@ FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out)
     size_t frozen_count = db->flush == NULL ? 0 : db->flush->frozen.count;
     *out = status != FASTDB_OK ? (FastDBStats){0} :
            (FastDBStats){db->sequence, db->tree.count + frozen_count,
-                         fdb_memory_bytes(db) + db->disk_budget,
+                         fdb_memory_bytes(db) + db->reserved_bytes,
                          db->iterator_bytes, db->iterator_count};
     pthread_mutex_unlock(&db->mutex);
     return status;
@@ -566,11 +633,96 @@ static FastDBStatus preflight(FastDB *db, const Operation *op, size_t *mutations
     return *mutations > UINT64_MAX - db->sequence ? FASTDB_LIMIT_EXCEEDED : FASTDB_OK;
 }
 
+static size_t eviction_offset(const FDBNode *node)
+{
+    return sizeof(*node) + node->record.key.size + node->record.value.size;
+}
+
+static EvictionRecord eviction_record(const FDBNode *node)
+{
+    EvictionRecord metadata;
+    memcpy(&metadata, (const unsigned char *)node + eviction_offset(node), sizeof(metadata));
+    return metadata;
+}
+
+static void store_eviction_record(FDBNode *node, EvictionRecord metadata)
+{
+    memcpy((unsigned char *)node + eviction_offset(node), &metadata, sizeof(metadata));
+}
+
+static uint64_t next_touch(Eviction *cache)
+{
+    if (cache->tick != UINT64_MAX)
+        ++cache->tick;
+    return cache->tick;
+}
+
+static void touch_cached_key(FastDB *db, FastDBSlice key)
+{
+    Eviction *cache = eviction_state(db);
+    if (cache == NULL || cache->policy == FASTDB_EVICTION_FIFO)
+        return;
+    /* A successful memory lookup still owns the database mutex. */
+    FDBNode *node = (FDBNode *)fdb_tree_get(&db->tree, key);
+    EvictionRecord metadata = eviction_record(node);
+    if (cache->policy == FASTDB_EVICTION_LRU)
+        metadata.touched = next_touch(cache);
+    else if (metadata.hits != UINT64_MAX)
+        ++metadata.hits;
+    store_eviction_record(node, metadata);
+}
+
+typedef struct EvictionVictim {
+    const FDBNode *node;
+    EvictionRecord metadata;
+} EvictionVictim;
+
+static bool preferable_victim(FastDBEvictionPolicy policy, const FDBNode *node,
+                               EvictionRecord metadata, const EvictionVictim *current)
+{
+    if (current->node == NULL)
+        return true;
+    if (policy == FASTDB_EVICTION_LFU && metadata.hits != current->metadata.hits)
+        return metadata.hits < current->metadata.hits;
+    if (policy == FASTDB_EVICTION_LRU) {
+        if (metadata.touched != current->metadata.touched)
+            return metadata.touched < current->metadata.touched;
+        return node->record.sequence < current->node->record.sequence;
+    }
+    return metadata.inserted < current->metadata.inserted;
+}
+
+static void select_victim(const FDBNode *node, FastDBEvictionPolicy policy,
+                           uint64_t before, EvictionVictim *victim)
+{
+    if (node == NULL)
+        return;
+    select_victim(node->left, policy, before, victim);
+    if (node->record.sequence <= before) {
+        EvictionRecord metadata = eviction_record(node);
+        if (preferable_victim(policy, node, metadata, victim))
+            *victim = (EvictionVictim){node, metadata};
+    }
+    select_victim(node->right, policy, before, victim);
+}
+
+static void enforce_live_capacity(FastDB *db, const Eviction *cache)
+{
+    while (live_tree_bytes(db) > cache->limit) {
+        EvictionVictim victim = {0};
+        select_victim(db->tree.root, cache->policy, db->sequence, &victim);
+        /* The new PUT set fits on its own, so any excess has a pre-commit victim. */
+        fdb_tree_delete(&db->tree, victim.node->record.key);
+    }
+}
+
 static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique, size_t spare)
 {
     size_t keys = db->tree.count;
     size_t key_bytes = db->tree.key_bytes;
     bool keep_tombstones = fdb_disk_has_tables(db->disk);
+    const Eviction *cache = eviction_state(db);
+    size_t write_set_budget = cache == NULL ? 0 : cache->limit;
     for (size_t i = 0; i < unique; ++i) {
         StagedWrite *write = &stages[i];
         const FDBRecord *record = &write->record;
@@ -588,7 +740,15 @@ static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique
         }
         if (!allocate)
             continue;
-        if (!fdb_node_size(record->key, record->value, &write->bytes) || write->bytes > spare)
+        if (!fdb_node_size(record->key, record->value, &write->bytes))
+            return FASTDB_LIMIT_EXCEEDED;
+        if (cache != NULL) {
+            if (!fdb_add_size(write->bytes, sizeof(EvictionRecord), &write->bytes) ||
+                write->bytes > write_set_budget)
+                return FASTDB_LIMIT_EXCEEDED;
+            write_set_budget -= write->bytes;
+        }
+        if (write->bytes > spare)
             return FASTDB_LIMIT_EXCEEDED;
         spare -= write->bytes;
     }
@@ -626,17 +786,32 @@ static FastDBStatus publish_stages(FastDB *db, StagedWrite *stages, size_t count
         if (status == FASTDB_OK)
             status = fdb_disk_append(db->disk, journal, count);
     }
+    Eviction *cache = eviction_state(db);
+    uint64_t touch = 0;
+    if (status == FASTDB_OK && cache != NULL && cache->policy == FASTDB_EVICTION_LRU)
+        touch = next_touch(cache);
     for (size_t i = 0; i < unique; ++i) {
         StagedWrite *write = &stages[i];
-        if (status != FASTDB_OK)
+        if (status != FASTDB_OK) {
             free(write->node);
-        else if (write->node != NULL)
+        } else if (write->node != NULL) {
+            if (cache != NULL) {
+                const FDBNode *old = fdb_tree_get(&db->tree, write->record.key);
+                EvictionRecord metadata = old == NULL ?
+                    (EvictionRecord){.inserted = write->record.sequence} : eviction_record(old);
+                metadata.touched = touch;
+                store_eviction_record(write->node, metadata);
+            }
             fdb_tree_put(&db->tree, write->node);
-        else
+        } else {
             fdb_tree_delete(&db->tree, write->record.key);
+        }
     }
-    if (status == FASTDB_OK)
+    if (status == FASTDB_OK) {
+        if (cache != NULL)
+            enforce_live_capacity(db, cache);
         db->sequence = sequence;
+    }
     return status;
 }
 
@@ -658,7 +833,7 @@ static FastDBStatus allocate_stages(size_t count, size_t *spare,
 
 static size_t write_headroom(const FastDB *db)
 {
-    return db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
+    return db->limits.max_memory_bytes - db->reserved_bytes - fdb_memory_bytes(db);
 }
 
 static size_t replay_headroom(void *context)
@@ -879,6 +1054,7 @@ FastDBStatus fastdb_get_with_revision(FastDB *db, const void *key, size_t key_si
     FDBLookup found;
     status = lookup(db, slice, true, true, &found);
     if (status == FASTDB_OK && found.revision != 0) {
+        touch_cached_key(db, slice);
         *value = found.value;
         *value_size = found.size;
         *revision = found.revision;
@@ -912,6 +1088,8 @@ FastDBStatus fastdb_exists(FastDB *db, const void *key, size_t key_size, bool *e
     FDBLookup found;
     status = lookup(db, slice, false, true, &found);
     *exists = status == FASTDB_OK && found.revision != 0;
+    if (*exists)
+        touch_cached_key(db, slice);
     pthread_mutex_unlock(&db->mutex);
     return status;
 }

@@ -43,6 +43,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     fastdb_test(fastdb_snapshot native/snapshot.c fastdb_shared "integration;concurrency;recovery")
     target_link_libraries(fastdb_snapshot PRIVATE Threads::Threads)
     fastdb_test(fastdb_ttl native/ttl.c fastdb_static "integration;recovery")
+    fastdb_test(fastdb_eviction native/eviction.c fastdb_shared integration)
     target_link_options(fastdb_ttl PRIVATE -Wl,--wrap=fdb_read_time)
     target_include_directories(fastdb_ttl PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
         "${PROJECT_SOURCE_DIR}/src/storage")

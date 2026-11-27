@@ -132,7 +132,7 @@ static FastDBStatus build_page(FastDB *db, const ScanView *view, const ScanBound
 {
     if (db->iterator_count == db->limits.max_open_iterators)
         return FASTDB_LIMIT_EXCEEDED;
-    size_t memory = db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
+    size_t memory = db->limits.max_memory_bytes - db->reserved_bytes - fdb_memory_bytes(db);
     if (memory < sizeof(FastDBIterator))
         return FASTDB_LIMIT_EXCEEDED;
     unsigned char *scratch = NULL;

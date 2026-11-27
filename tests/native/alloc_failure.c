@@ -29,8 +29,53 @@ void *__wrap_calloc(size_t count, size_t size)
     return fail() ? NULL : __real_calloc(count, size);
 }
 
+static void eviction_rollback(void)
+{
+    FastDBOptions *options;
+    FastDB *db;
+    FastDBStats empty, full, after;
+    OK(fastdb_options_create(&options));
+    OK(fastdb_options_set_eviction(options, FASTDB_EVICTION_FIFO, 4096));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_stats(db, &empty));
+    OK(fastdb_put(db, "a", 1, "A", 1));
+    OK(fastdb_stats(db, &full));
+    size_t entry = full.memory_bytes - empty.memory_bytes;
+    OK(fastdb_close(db));
+    OK(fastdb_options_set_eviction(options, FASTDB_EVICTION_FIFO, 2 * entry));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "A", 1));
+    OK(fastdb_put(db, "b", 1, "B", 1));
+    OK(fastdb_stats(db, &full));
+    FastDBBatch *batch;
+    OK(fastdb_batch_create(options, &batch));
+    OK(fastdb_batch_put(batch, "c", 1, "C", 1));
+    OK(fastdb_batch_put(batch, "d", 1, "D", 1));
+    fail_after = 2; /* Staging array, first node, then fail the second node. */
+    STATUS(fastdb_batch_commit(db, batch), FASTDB_OUT_OF_MEMORY);
+    CHECK(fail_after == SIZE_MAX);
+    OK(fastdb_stats(db, &after));
+    CHECK(full.memory_bytes == after.memory_bytes && after.revision == 2 && after.record_count == 2);
+    bool present;
+    OK(fastdb_exists(db, "a", 1, &present));
+    CHECK(present);
+    OK(fastdb_exists(db, "b", 1, &present));
+    CHECK(present);
+    OK(fastdb_exists(db, "c", 1, &present));
+    CHECK(!present);
+    OK(fastdb_batch_commit(db, batch));
+    OK(fastdb_stats(db, &after));
+    CHECK(after.revision == 4 && after.record_count == 2);
+    OK(fastdb_exists(db, "a", 1, &present));
+    CHECK(!present);
+    fastdb_batch_destroy(batch);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+}
+
 int main(void)
 {
+    eviction_rollback();
     FastDB *db;
     fail_after = 0;
     STATUS(fastdb_open(NULL, &db), FASTDB_OUT_OF_MEMORY);

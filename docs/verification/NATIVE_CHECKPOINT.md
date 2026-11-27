@@ -923,6 +923,48 @@ cmake --build /tmp/p39-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p39-tsan -L concurrency --repeat until-fail:5 --output-on-failure
 ```
 
+## P3.9 completion with opt-in FIFO, LRU and LFU (V070)
+
+The eviction tests were added before implementing the engine API. Building
+`fastdb_eviction` in `/tmp/p39-eviction-red` compiled the new fixture and
+failed to link the missing `fastdb_options_set_eviction` symbol.
+
+The final cases verify policy order, replacement behavior, persistent-mode
+rejection, snapshot retention, live capacity limits, hard staging memory
+admission and allocation failure on the second replacement node. All
+existing assertions, including the 512-byte default memory fixture, pass.
+The commands ran in the V064 Docker toolchain with a read-only source bind.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p39-eviction-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p39-eviction-red --target fastdb_ttl fastdb_eviction --parallel
+CC=gcc cmake -S /repo -B /tmp/p39-eviction-green -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p39-eviction-green --parallel
+ctest --test-dir /tmp/p39-eviction-green -R '^fastdb_eviction$' --output-on-failure
+ctest --test-dir /tmp/p39-eviction-green -R '^fastdb_alloc_failure$' --output-on-failure
+ctest --test-dir /tmp/p39-eviction-green -R '^fastdb_ttl$' --output-on-failure
+ctest --test-dir /tmp/p39-eviction-green --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p39-eviction-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p39-eviction-clang --parallel
+ctest --test-dir /tmp/p39-eviction-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p39-eviction-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p39-eviction-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p39-eviction-asan --output-on-failure
+```
+
+Each focused case passed 1/1 and each full profile passed 26/26. The
+Docker image rebuilt with `docker build -t fastdb-native:local .` and its
+Release suite passed 26/26. GCC TSan with the V062 Docker workaround passed
+four concurrency suites five times each.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p39-eviction-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p39-eviction-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p39-eviction-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

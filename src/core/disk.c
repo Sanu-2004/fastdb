@@ -229,7 +229,7 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
     FDBDisk *disk = calloc(1, sizeof(*disk));
     if (disk == NULL)
         return FASTDB_OUT_OF_MEMORY;
-    FastDBStatus status = settings(options, disk, &db->disk_budget);
+    FastDBStatus status = settings(options, disk, &db->reserved_bytes);
     if (status == FASTDB_OK)
         status = fdb_dir_lock_checked(options->path, fs, check_directory, &disk->dir);
     if (status != FASTDB_OK) {
@@ -716,7 +716,7 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         disk->compaction_cleanup_needed = false;
     }
 
-    size_t headroom = db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
+    size_t headroom = db->limits.max_memory_bytes - db->reserved_bytes - fdb_memory_bytes(db);
     size_t available = disk->table_workspace + headroom;
     size_t cap = disk->compaction.max_working_bytes;
     if (cap != 0 && cap < available)
@@ -772,7 +772,7 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         status = fdb_storage_prepare_maintenance(&disk->log);
         if (status != FASTDB_OK)
             break;
-        headroom = db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
+        headroom = db->limits.max_memory_bytes - db->reserved_bytes - fdb_memory_bytes(db);
         available = headroom + disk->table_workspace;
         if (cap != 0 && cap < available)
             available = cap;

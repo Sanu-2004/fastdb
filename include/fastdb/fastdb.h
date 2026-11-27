@@ -61,6 +61,13 @@ typedef enum FastDBMode {
     FASTDB_MODE_LSM = 2
 } FastDBMode;
 
+typedef enum FastDBEvictionPolicy {
+    FASTDB_EVICTION_NONE = 0,
+    FASTDB_EVICTION_FIFO = 1,
+    FASTDB_EVICTION_LRU = 2,
+    FASTDB_EVICTION_LFU = 3
+} FastDBEvictionPolicy;
+
 typedef struct FastDBPersistentOptions {
     FastDBDurability durability;
     uint64_t max_wal_segment_bytes;
@@ -121,6 +128,10 @@ FASTDB_API FastDBStatus fastdb_options_create(FastDBOptions **out);
 FASTDB_API void fastdb_options_destroy(FastDBOptions *options);
 FASTDB_API FastDBStatus fastdb_options_set_limits(FastDBOptions *options,
                                                   const FastDBLimits *limits);
+/* Memory-only live tree capacity in charged bytes. NONE requires zero. */
+FASTDB_API FastDBStatus fastdb_options_set_eviction(FastDBOptions *options,
+                                                    FastDBEvictionPolicy policy,
+                                                    size_t max_live_bytes);
 /* Persistent modes use an existing directory. Memory mode requires NULL path and settings. */
 FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
                                                    const char *path,

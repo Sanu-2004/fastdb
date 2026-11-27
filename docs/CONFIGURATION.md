@@ -61,8 +61,33 @@ database mutex and commits each deletion separately, reporting the number
 confirmed even if a later deletion fails. Persistent memory uses the WAL
 and configured durability for these deletes. A snapshot retains its
 independent copy. LSM retains expired records as masks until safe history
-collection and returns `FASTDB_UNSUPPORTED` for explicit purge. Live
-entries are not evicted under memory pressure.
+collection and returns `FASTDB_UNSUPPORTED` for explicit purge.
+
+### Optional memory eviction
+
+Eviction defaults to `FASTDB_EVICTION_NONE`. For memory-only caches, call
+`fastdb_options_set_eviction` with FIFO, LRU or LFU and an explicit
+`max_live_bytes` capacity before opening. The capacity includes live tree
+nodes, keys, values and policy metadata. It must fit inside
+`max_memory_bytes`, which also covers the handle, temporary write
+allocations, snapshots and pages. Leave extra room for writes to stage
+replacement nodes while the current tree is still intact. Persistent modes
+reject enabled eviction.
+
+- FIFO selects the earliest insertion. A replacement keeps its insertion age.
+- LRU selects the least recently touched entry. Successful live GET and
+  exists calls touch an entry. Writes in one batch share a touch time and
+  break ties by revision.
+- LFU selects the fewest successful live GET and exists calls, then the
+  earliest insertion. Replacements preserve the counter.
+
+Snapshots, scans and batch conditions leave hit counts and recency unchanged.
+An enabled cache can evict existing entries as part of publishing a
+successful write. The final PUTs of a batch must fit together and are
+protected from that batch's eviction. Admission or allocation failure
+preserves all prior entries. Evictions share the write's visibility point
+and the write's revision boundary. Finding a victim performs one traversal
+of the live tree.
 
 To configure persistence, initialize `FastDBPersistentOptions` with
 `fastdb_persistent_options_default`, then pass it to `fastdb_options_set_storage`

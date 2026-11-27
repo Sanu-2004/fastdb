@@ -6,7 +6,7 @@ static FastDBStatus capture(FastDB *db, FastDBSnapshot **out)
 {
     if (fdb_disk_poisoned(db->disk))
         return FASTDB_COMMIT_UNCERTAIN;
-    size_t headroom = db->limits.max_memory_bytes - db->disk_budget - fdb_memory_bytes(db);
+    size_t headroom = db->limits.max_memory_bytes - db->reserved_bytes - fdb_memory_bytes(db);
     size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
     size_t bytes;
     if (db->snapshot_bytes != 0 || !fdb_add_size(sizeof(FastDBSnapshot), db->tree.bytes, &bytes) ||
