@@ -13,6 +13,7 @@ struct FastDBOptions {
     FastDBCompactionOptions compaction;
     size_t flush_threshold;
     size_t arena_chunk_bytes;
+    size_t block_cache_bytes;
     FastDBEvictionPolicy eviction_policy;
     size_t max_live_bytes;
 };

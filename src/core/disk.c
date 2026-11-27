@@ -9,6 +9,7 @@
 
 struct FDBDisk {
     size_t compaction_bytes;
+    FDBBlockCache *block_cache;
     size_t arena_chunk_bytes;
     size_t active_key_bytes;
     size_t frozen_key_bytes;
@@ -150,6 +151,11 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
         return FASTDB_INVALID_ARGUMENT;
     if (!fdb_add_size(*workspace, disk->table_workspace, workspace))
         return FASTDB_INVALID_ARGUMENT;
+    if (options->block_cache_bytes != 0 &&
+        (options->mode != FASTDB_MODE_LSM ||
+         !fdb_block_cache_valid_limit(options->block_cache_bytes) ||
+         !fdb_add_size(*workspace, options->block_cache_bytes, workspace)))
+        return FASTDB_INVALID_ARGUMENT;
     size_t smallest_node;
     size_t available = limits->max_memory_bytes - sizeof(FastDB);
     if (!fdb_node_size((FastDBSlice){.size = 1}, (FastDBSlice){0}, &smallest_node) ||
@@ -247,8 +253,11 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
         return FASTDB_OUT_OF_MEMORY;
     FastDBStatus status = settings(options, disk, &db->reserved_bytes);
     if (status == FASTDB_OK)
+        status = fdb_block_cache_create(options->block_cache_bytes, &disk->block_cache);
+    if (status == FASTDB_OK)
         status = fdb_dir_lock_checked(options->path, fs, check_directory, &disk->dir);
     if (status != FASTDB_OK) {
+        fdb_block_cache_destroy(disk->block_cache);
         free(disk);
         return status;
     }
@@ -264,6 +273,7 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
     if (status != FASTDB_OK) {
         db->disk = NULL;
         (void)fdb_dir_close(&disk->dir);
+        fdb_block_cache_destroy(disk->block_cache);
         free(disk);
         return status;
     }
@@ -281,6 +291,7 @@ FastDBStatus fdb_disk_close(FDBDisk *disk)
         status = fdb_storage_prepare_maintenance(&disk->log);
     FastDBStatus wal_status = fdb_wal_set_close(&disk->log);
     FastDBStatus dir_status = fdb_dir_close(&disk->dir);
+    fdb_block_cache_destroy(disk->block_cache);
     free(disk);
     if (status != FASTDB_OK)
         return status;
@@ -295,6 +306,11 @@ bool fdb_disk_poisoned(const FDBDisk *disk)
 bool fdb_disk_has_tables(const FDBDisk *disk)
 {
     return disk != NULL && disk->mode == FASTDB_MODE_LSM;
+}
+
+void fdb_disk_cache_stats(const FDBDisk *disk, FastDBBlockCacheStats *out)
+{
+    fdb_block_cache_stats(disk == NULL ? NULL : disk->block_cache, out);
 }
 
 size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk)
@@ -402,11 +418,20 @@ FastDBStatus fdb_lookup_record(const FDBRecord *record, bool copy, FDBLookup *ou
     return FASTDB_OK;
 }
 
+static FastDBStatus open_read_table(const FDBDisk *disk, const FDBManifestEntry *entry,
+                                     FDBSSTReader **out)
+{
+    FastDBStatus status = fdb_catalog_open_table(&disk->dir, entry, &disk->table, out);
+    if (status == FASTDB_OK)
+        fdb_sst_reader_set_cache(*out, disk->block_cache);
+    return status;
+}
+
 static FastDBStatus find_in_table(const FDBDisk *disk, const FDBManifestEntry *entry,
                                   FastDBSlice key, uint64_t sequence, bool copy, FDBLookup *out)
 {
     FDBSSTReader *reader;
-    FastDBStatus status = fdb_catalog_open_table(&disk->dir, entry, &disk->table, &reader);
+    FastDBStatus status = open_read_table(disk, entry, &reader);
     if (status != FASTDB_OK)
         return status;
     FDBSSTIterator *iter;
@@ -508,7 +533,7 @@ FastDBStatus fdb_disk_find_view(const FDBDisk *disk, const FDBManifest *catalog,
 static FastDBStatus scan_open(const FDBDisk *disk, const FDBManifestEntry *file,
                               FDBSSTReader **reader, FDBSSTIterator **iter)
 {
-    FastDBStatus status = fdb_catalog_open_table(&disk->dir, file, &disk->table, reader);
+    FastDBStatus status = open_read_table(disk, file, reader);
     if (status == FASTDB_OK) {
         status = fdb_sst_iter_open(*reader, iter);
         if (status != FASTDB_OK)

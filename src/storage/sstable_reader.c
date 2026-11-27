@@ -18,6 +18,7 @@ struct FDBSSTReader {
     FDBFs fs;
     FDBSSTLimits limits;
     FDBSSTProperties properties;
+    FDBBlockCache *cache;
     unsigned char *properties_image;
     unsigned char *index_image;
     unsigned char *filter_image;
@@ -29,6 +30,8 @@ struct FDBSSTReader {
 
 struct FDBSSTIterator {
     const FDBSSTReader *reader;
+    FDBCachedBlock *pin;
+    const unsigned char *block;
     const unsigned char *offsets;
     size_t block_number;
     size_t row_count;
@@ -38,7 +41,7 @@ struct FDBSSTIterator {
     FastDBStatus status;
     bool valid;
     FDBSSTBloomStats bloom_stats;
-    unsigned char block[];
+    unsigned char scratch[];
 };
 
 typedef struct Regions {
@@ -313,6 +316,11 @@ const FDBSSTProperties *fdb_sst_reader_properties(const FDBSSTReader *reader)
     return &reader->properties;
 }
 
+void fdb_sst_reader_set_cache(FDBSSTReader *reader, FDBBlockCache *cache)
+{
+    reader->cache = cache;
+}
+
 size_t fdb_sst_reader_corrupt_partitions(const FDBSSTReader *reader)
 {
     return reader->corrupt_partitions;
@@ -379,24 +387,41 @@ static FastDBStatus load_block(FDBSSTIterator *iter, size_t index)
 {
     const FDBSSTReader *reader = iter->reader;
     const IndexEntry *entry = &reader->index[index];
-    unsigned char *block = iter->block;
-    FastDBStatus status = read_exact(reader, entry->offset, block, entry->bytes);
-    if (status != FASTDB_OK)
-        return status;
+    if (reader->cache != NULL) {
+        fdb_block_cache_release(reader->cache, iter->pin);
+        iter->pin = fdb_block_cache_acquire(reader->cache, reader->properties.id,
+                                            entry->offset, entry->bytes);
+    }
+    const unsigned char *block;
+    if (iter->pin != NULL) {
+        block = fdb_cached_block_data(iter->pin);
+    } else {
+        FastDBStatus status = read_exact(reader, entry->offset, iter->scratch, entry->bytes);
+        if (status != FASTDB_OK)
+            return status;
+        block = iter->scratch;
+    }
     size_t record_bytes = fdb_decode_u32(block + 4);
     size_t rows = fdb_decode_u32(block + 8);
     size_t body_size = entry->bytes - SST_BLOCK_HEADER_BYTES;
     if (fdb_decode_u32(block) != SST_BLOCK_MAGIC || record_bytes > body_size || rows == 0 ||
         rows > record_bytes / (FDB_RECORD_HEADER_BYTES + 1) ||
         (body_size - record_bytes) % SST_OFFSET_BYTES != 0 ||
-        rows != (body_size - record_bytes) / SST_OFFSET_BYTES ||
-        fdb_decode_u32(block + 12) != fdb_crc32c(block + SST_BLOCK_HEADER_BYTES, body_size))
+        rows != (body_size - record_bytes) / SST_OFFSET_BYTES)
         return FASTDB_CORRUPTION;
+    iter->block = block;
     iter->offsets = block + SST_BLOCK_HEADER_BYTES + record_bytes;
     iter->block_number = index;
     iter->row_count = rows;
     iter->record_bytes = record_bytes;
-    return verify_block(reader, iter, index);
+    if (iter->pin != NULL)
+        return FASTDB_OK;
+    if (fdb_decode_u32(block + 12) != fdb_crc32c(block + SST_BLOCK_HEADER_BYTES, body_size))
+        return FASTDB_CORRUPTION;
+    FastDBStatus status = verify_block(reader, iter, index);
+    if (status == FASTDB_OK && reader->cache != NULL)
+        fdb_block_cache_store(reader->cache, reader->properties.id, entry->offset, block, entry->bytes);
+    return status;
 }
 
 static void move_to(FDBSSTIterator *iter, size_t row)
@@ -545,6 +570,8 @@ void fdb_sst_iter_bloom_stats(const FDBSSTIterator *iter, FDBSSTBloomStats *out)
 
 void fdb_sst_iter_close(FDBSSTIterator *iter)
 {
+    if (iter != NULL && iter->pin != NULL)
+        fdb_block_cache_release(iter->reader->cache, iter->pin);
     free(iter);
 }
 

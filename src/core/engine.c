@@ -202,6 +202,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->storage = (FastDBPersistentOptions){0};
         options->flush_threshold = 0;
         options->arena_chunk_bytes = 0;
+        options->block_cache_bytes = 0;
         fastdb_compaction_options_default(&options->compaction);
         return FASTDB_OK;
     }
@@ -214,6 +215,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         fastdb_compaction_options_default(&next.compaction);
         next.flush_threshold = 0;
         next.arena_chunk_bytes = 0;
+        next.block_cache_bytes = 0;
     }
     if (settings == NULL)
         fastdb_persistent_options_default(&next.storage);
@@ -232,6 +234,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->compaction = next.compaction;
     options->flush_threshold = next.flush_threshold;
     options->arena_chunk_bytes = next.arena_chunk_bytes;
+    options->block_cache_bytes = next.block_cache_bytes;
     return FASTDB_OK;
 }
 
@@ -269,6 +272,18 @@ FastDBStatus fastdb_options_set_lsm_arena(FastDBOptions *options, size_t chunk_b
     FastDBStatus status = fdb_disk_validate(&candidate);
     if (status == FASTDB_OK)
         options->arena_chunk_bytes = chunk_bytes;
+    return status;
+}
+
+FastDBStatus fastdb_options_set_lsm_block_cache(FastDBOptions *options, size_t max_bytes)
+{
+    if (options == NULL || options->mode != FASTDB_MODE_LSM)
+        return FASTDB_INVALID_ARGUMENT;
+    FastDBOptions candidate = *options;
+    candidate.block_cache_bytes = max_bytes;
+    FastDBStatus status = fdb_disk_validate(&candidate);
+    if (status == FASTDB_OK)
+        options->block_cache_bytes = max_bytes;
     return status;
 }
 
@@ -454,6 +469,20 @@ FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out)
            (FastDBStats){db->sequence, db->tree.count + frozen_count,
                          fdb_memory_bytes(db) + db->reserved_bytes,
                          db->iterator_bytes, db->iterator_count};
+    pthread_mutex_unlock(&db->mutex);
+    return status;
+}
+
+FastDBStatus fastdb_block_cache_stats(FastDB *db, FastDBBlockCacheStats *out)
+{
+    if (db == NULL || out == NULL)
+        return FASTDB_INVALID_ARGUMENT;
+    pthread_mutex_lock(&db->mutex);
+    FastDBStatus status = fdb_disk_poisoned(db->disk) ? FASTDB_COMMIT_UNCERTAIN : FASTDB_OK;
+    if (status == FASTDB_OK)
+        fdb_disk_cache_stats(db->disk, out);
+    else
+        *out = (FastDBBlockCacheStats){0};
     pthread_mutex_unlock(&db->mutex);
     return status;
 }

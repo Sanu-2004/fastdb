@@ -81,6 +81,13 @@ and the background worker waits. The next maintenance call or close reclaims
 the obsolete files after the reader releases them. A manual compaction may
 report `FASTDB_BUSY` after one successful catalog edit.
 For keys absent from memory, the engine compares matching tables by revision.
+An optional block cache uses its own mutex for recency, pins, and counters.
+A serialized read can enter the cache with the database mutex held. A
+detached read releases the cache mutex before returning to the database
+mutex. Disk I/O runs outside the cache mutex. A cache hit pins immutable
+bytes until the iterator loads another block or closes. The existing point
+read and snapshot catalog lifetimes still control which files can be read.
+
 The background worker holds the mutex for WAL rotation, catalog commits and
 reclamation. It releases the mutex while it constructs and syncs the SSTable
 from the immutable tree. Writes may rotate later WAL segments during this

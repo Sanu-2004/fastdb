@@ -1,6 +1,7 @@
 #include "disk_fixture.h"
 #include "engine.h"
 #include "manifest.h"
+#include "sstable_format.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -115,6 +116,8 @@ static void across_compaction(bool start_with_tombstone)
     fastdb_compaction_options_default(&policy);
     policy.max_levels = 2;
     OK(fastdb_options_set_compaction(options, &policy));
+    if (start_with_tombstone)
+        OK(fastdb_options_set_lsm_block_cache(options, 4096));
 
     ReadGate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
                      .foreground = pthread_self()};
@@ -460,6 +463,133 @@ static void merge_larger_than_memory(void)
     remove_disk_fixture(path);
 }
 
+typedef struct BlockReads {
+    size_t block_size;
+    size_t reads;
+    bool fail;
+} BlockReads;
+
+static FDBFsFault count_block_reads(void *context, FDBFsOp operation, size_t size)
+{
+    BlockReads *probe = context;
+    if (operation == FDB_FS_READ && size == probe->block_size) {
+        ++probe->reads;
+        if (probe->fail)
+            return (FDBFsFault){.error = EIO};
+    }
+    return (FDBFsFault){0};
+}
+
+static void *repeat_cache_hits(void *arg)
+{
+    for (size_t i = 0; i < 100; ++i)
+        read_k(arg);
+    return NULL;
+}
+
+static void verify_disk_block_cache(void)
+{
+    char first[] = "/tmp/fastdb-cache-a.XXXXXXXX", second[] = "/tmp/fastdb-cache-b.XXXXXXXX";
+    CHECK(mkdtemp(first) != NULL && mkdtemp(second) != NULL);
+    FastDBOptions *a = disk_options(first, FASTDB_DURABILITY_SYNC);
+    FastDBOptions *b = disk_options(second, FASTDB_DURABILITY_SYNC);
+    FastDBOptions *memory;
+    OK(fastdb_options_create(&memory));
+    STATUS(fastdb_options_set_lsm_block_cache(memory, 4096), FASTDB_INVALID_ARGUMENT);
+    fastdb_options_destroy(memory);
+    STATUS(fastdb_options_set_lsm_block_cache(a, SIZE_MAX), FASTDB_INVALID_ARGUMENT);
+    STATUS(fastdb_options_set_lsm_block_cache(a, 1), FASTDB_INVALID_ARGUMENT);
+    OK(fastdb_options_set_lsm_block_cache(a, 4096));
+    OK(fastdb_options_set_lsm_block_cache(b, 4096));
+    const unsigned char old[96] = {1}, other[96] = {2};
+    const size_t block_size = SST_BLOCK_HEADER_BYTES + FDB_RECORD_HEADER_BYTES + 1 +
+                              sizeof(old) + SST_OFFSET_BYTES;
+    BlockReads probe = {.block_size = block_size};
+    const FDBFs fs = {count_block_reads, &probe};
+    FastDB *left, *right;
+    OK(fastdb_open(NULL, &left));
+    FastDBBlockCacheStats stats;
+    OK(fastdb_block_cache_stats(left, &stats));
+    CHECK(stats.hits == 0 && stats.misses == 0 && stats.evictions == 0 &&
+          stats.entries == 0 && stats.memory_bytes == 0 && stats.max_bytes == 0);
+    OK(fastdb_close(left));
+    OK(fdb_open_with_fs(a, &fs, &left));
+    OK(fastdb_open(b, &right));
+    OK(fastdb_put(left, "k", 1, old, sizeof(old)));
+    OK(fastdb_flush(left));
+    OK(fastdb_put(right, "k", 1, other, sizeof(other)));
+    OK(fastdb_flush(right));
+    OK(fastdb_block_cache_stats(left, &stats));
+    CHECK(stats.hits == 0 && stats.misses == 0 && stats.entries == 0 && stats.max_bytes == 4096);
+    size_t baseline = stats.memory_bytes;
+    FastDBStats db_stats;
+    OK(fastdb_stats(left, &db_stats));
+    CHECK(db_stats.memory_bytes >= stats.max_bytes);
+
+    probe.reads = 0;
+    probe.fail = true;
+    void *value;
+    size_t size;
+    STATUS(fastdb_get(left, "k", 1, &value, &size), FASTDB_IO_ERROR);
+    CHECK(value == NULL && size == 0 && probe.reads == 1);
+    OK(fastdb_block_cache_stats(left, &stats));
+    CHECK(stats.misses == 1 && stats.hits == 0 && stats.entries == 0 &&
+          stats.memory_bytes == baseline);
+    probe.fail = false;
+    expect_value(left, (FastDBSlice){"k", 1}, (FastDBSlice){old, sizeof(old)}, 1);
+    CHECK(probe.reads == 2);
+    expect_value(right, (FastDBSlice){"k", 1}, (FastDBSlice){other, sizeof(other)}, 1);
+    OK(fastdb_block_cache_stats(right, &stats));
+    CHECK(stats.misses == 1 && stats.hits == 0 && stats.entries == 1);
+    ReadRequest request = {right, FASTDB_OK, {other, sizeof(other)}, 1};
+    pthread_t reader;
+    CHECK(pthread_create(&reader, NULL, repeat_cache_hits, &request) == 0);
+    repeat_cache_hits(&request);
+    OK(fastdb_block_cache_stats(right, &stats));
+    CHECK(stats.hits >= 100 && stats.hits <= 200 && stats.misses == 1);
+    CHECK(pthread_join(reader, NULL) == 0);
+    OK(fastdb_block_cache_stats(right, &stats));
+    CHECK(stats.hits == 200 && stats.misses == 1 && stats.entries == 1);
+    probe.fail = true;
+    expect_value(left, (FastDBSlice){"k", 1}, (FastDBSlice){old, sizeof(old)}, 1);
+    CHECK(probe.reads == 2);
+    OK(fastdb_block_cache_stats(left, &stats));
+    CHECK(stats.misses == 2 && stats.hits == 1 && stats.entries == 1 &&
+          stats.memory_bytes > baseline && stats.memory_bytes <= stats.max_bytes);
+    FastDBIterator *page;
+    OK(fastdb_scan_prefix(left, (FastDBSlice){"k", 1}, 1, &page));
+    FastDBSlice key, record;
+    uint64_t revision;
+    OK(fastdb_iterator_next(page, &key, &record, &revision));
+    CHECK(revision == 1 && key.size == 1 && memcmp(key.data, "k", 1) == 0 &&
+          record.size == sizeof(old) && memcmp(record.data, old, record.size) == 0);
+    fastdb_iterator_close(page);
+    CHECK(probe.reads == 2);
+
+    probe.fail = false;
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(left, &snapshot));
+    OK(fastdb_put(left, "k", 1, other, sizeof(other)));
+    OK(fastdb_flush(left));
+    OK(fastdb_compact(left));
+    expect_value(left, (FastDBSlice){"k", 1}, (FastDBSlice){other, sizeof(other)}, 2);
+    OK(fastdb_snapshot_get(snapshot, "k", 1, &value, &size, &revision));
+    CHECK(revision == 1 && size == sizeof(old) && memcmp(value, old, size) == 0);
+    fastdb_free(value);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_close(left));
+    OK(fastdb_close(right));
+    OK(fastdb_open(a, &left));
+    OK(fastdb_block_cache_stats(left, &stats));
+    CHECK(stats.misses == 0 && stats.hits == 0 && stats.entries == 0);
+    expect_value(left, (FastDBSlice){"k", 1}, (FastDBSlice){other, sizeof(other)}, 2);
+    OK(fastdb_close(left));
+    fastdb_options_destroy(a);
+    fastdb_options_destroy(b);
+    remove_disk_fixture(first);
+    remove_disk_fixture(second);
+}
+
 int main(void)
 {
     across_compaction(false);
@@ -468,4 +598,5 @@ int main(void)
     writes_during_compaction();
     snapshot_during_mask_reclamation();
     merge_larger_than_memory();
+    verify_disk_block_cache();
 }

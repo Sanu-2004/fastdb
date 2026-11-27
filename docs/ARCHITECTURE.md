@@ -78,6 +78,11 @@ generation and the observed live revision. It also represents the absence
 of the key from both memory trees at that instant. File reclamation defers
 while this view is pinned. See [ADR 0006](adr/0006-pinned-sstable-reads.md).
 
+LSM point lookups and scans can use a per-handle LRU for verified data
+blocks. The catalog still selects the SSTable and supplies the file ID.
+Cache pins hold in-memory block bytes independently of catalog file pins.
+See [ADR 0010](adr/0010-bounded-sstable-block-cache.md).
+
 See [concurrency](CONCURRENCY.md) for linearization and ownership,
 [durability](DURABILITY.md) for persistent modes and publication,
 and [ADR 0001](adr/0001-native-memory-tree.md) for the tree and page design.

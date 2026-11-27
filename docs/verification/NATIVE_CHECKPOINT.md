@@ -1163,6 +1163,57 @@ passed 26/26 each. The V062 TSan workaround ran four concurrency targets
 five times each. Arena throughput and release-scale memory remain for
 benchmark runs.
 
+## P4.2 bounded LSM block cache (V075)
+
+At `85b18ce`, GCC Debug passed all 26 baseline tests. Adding the public
+read-view tests before implementation caused the expected build failure
+at `fastdb_options_set_lsm_block_cache` and `fastdb_block_cache_stats`.
+
+After implementation, a filesystem probe counted one data-block read on
+a cold GET. A warm GET and a prefix scan completed with data-block reads
+disabled. The first failed cold read propagated `FASTDB_IO_ERROR` and
+left the cache empty. The SSTable cases verify checksum and row-offset
+corruption leave the cache empty, and a cache hit stays valid while a
+second iterator reads a different block with a full cache. The unit
+fixture verifies LRU ordering and byte accounting, repeated pins, bypass
+when all entries are pinned, and allocation failure. Two readers of one
+database accounted for 200 hits after its first miss. A second database
+stored a different value at the matching key and file offset. The pinned
+snapshot retained its historical value through compaction and cold reopen
+served the latest value. The bounded compaction test observed 253,601
+charged bytes with foreground mutations under its 262,144-byte cap.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p42-base -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p42-base --parallel 6
+ctest --test-dir /tmp/p42-base --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p42-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p42-red --target fastdb_read_view --parallel 6
+CC=gcc cmake -S /repo -B /tmp/p42-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p42-gcc --parallel 6
+ctest --test-dir /tmp/p42-gcc -R '^fastdb_sstable_reader$' --output-on-failure
+ctest --test-dir /tmp/p42-gcc -R '^fastdb_read_view$' -V
+ctest --test-dir /tmp/p42-gcc -R '^fastdb_block_cache$' --output-on-failure
+ctest --test-dir /tmp/p42-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p42-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p42-clang --parallel 6
+ctest --test-dir /tmp/p42-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p42-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p42-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p42-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p42-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p42-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p42-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The focused tests passed 1/1 per target. All final full profiles passed
+27/27, including `docker build -t fastdb-native:local .`. Four TSan
+concurrency targets passed five runs each with the V062 workaround.
+The read probe measures data-block operations within the fixture. Cache
+throughput and latency benchmarking remain open.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

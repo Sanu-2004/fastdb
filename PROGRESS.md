@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-27\
-**Last verified base commit / branch:** `6d16f88` / `main`. V074 verifies P4.1.
+**Last verified base commit / branch:** `85b18ce` / `main`. V075 verifies P4.2.
 **Current milestone:** P4 — performance and configuration hardening.\
-**Next task:** P4.2 — bounded LRU SSTable block cache.
+**Next task:** P4.3 — interval WAL sync and group commit.
 
 ## 1. How to use this file
 
@@ -113,7 +113,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | ID | Task and minimum exit criterion | Status | Evidence / next action |
 |---|---|---|---|
 | P4.1 | Optional arena allocator with real allocation accounting, bounded history and safe lifetime. | DONE | V074 verifies the opt-in LSM arena, charged chunk capacity, allocation and admission rollback, snapshot lifetime, arena retention across a failed frozen flush, and two-WAL recovery after SIGKILL. Full profiles passed 26/26 each and TSan passed 20 executions. |
-| P4.2 | Thread-safe bounded LRU block cache, file ID/offset keys, pinned-block lifetime, metrics. | TODO | — |
+| P4.2 | Thread-safe bounded LRU block cache, file ID/offset keys, pinned-block lifetime, metrics. | DONE | V075 verifies the opt-in per-database cache, byte cap, LRU eviction, iterator pins, fault bypass, corruption rejection, file-ID isolation through compaction, concurrent hits and stats. See [ADR 0010](docs/adr/0010-bounded-sstable-block-cache.md). |
 | P4.3 | Group commit and interval sync worker; durable ACK ordering and sync-failure tests. | TODO | — |
 | P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | TODO | — |
 | P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | TODO | — |
@@ -199,13 +199,13 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G01 | Reproducible GCC + Clang build, C API/CLI and warnings check | PASS | V023, V041 |
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021. V074 revalidates the 512-byte memory fixture after adding the LSM allocator. |
 | G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021 |
-| G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021 |
+| G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021 and V075. Cached and uncached read paths preserve file identity and reject corrupt cold blocks. |
 | G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | PASS | V067–V068 cover complete batches, CAS, memory and LSM snapshots, merged scans and concurrent snapshot/maintenance fixtures. Release stress remains in G08/G09. |
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | V073 covers a deterministic multilevel merge larger than the engine budget. P8.3 tracks release-scale concurrent stress, RSS and FD measurements. |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V074 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V075 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -297,6 +297,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V072 | 2026-11-27 / P3.10 DELETE reclamation based on `8eeaee2` | Test-first GCC Debug compaction regression, focused compaction/read-view/crash tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Original compaction retained an eligible DELETE. Revised engine reclaims closed DELETE-led groups and keeps overlap masks, pre-existing snapshot masks, and the highest revision for WAL recovery. A snapshot captured during a detached merge holds the old files through publication. Focused targets passed 1/1 each including 27 crash cases. All full profiles passed 26/26 each. TSan passed 20 executions. |
 | V073 | 2026-11-27 / P3.11 bounded multilevel merge based on `281405e` | GCC Debug focused read-view, compaction and crash tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and measurement](docs/verification/NATIVE_CHECKPOINT.md). | PASS | L1/L2 input 300,067 bytes; L2 output 295,577 bytes. Charged memory was 81,963 bytes before merge, 253,327 bytes with merge workspace reserved, and 253,497 bytes with pending foreground mutations, under a 262,144-byte cap. Stable snapshot values and latest revisions verified after publication and reopen. Focused 1/1 per target, full 26/26 per profile, TSan 20 executions. |
 | V074 | 2026-11-27 / P4.1 LSM arena based on `6d16f88` | Test-first GCC Debug build, focused memory/LSM/allocation/worker tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS after fix | Test-first build found the missing API. Initial integrated profiles found a memory-only handle-size regression. Moved persistent accounting into disk state and preserved the memory handle charge. Final tests cover chunk reuse and rollback, flush retry, snapshot copies, two-WAL crash/replay, and reopen with arena disabled. Focused 1/1 per target, full 26/26 per profile, TSan 20 executions. |
+| V075 | 2026-11-27 / P4.2 block cache based on `85b18ce` | GCC Debug baseline and test-first build, focused cache/SSTable/read-view targets, GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 26/26. New tests failed to compile before the API existed. Final tests verified cold disk errors, no data-block read on warm GET or scan, iterator pins under eviction pressure, shared-cache concurrency, byte limits, database isolation, history through compaction, and cold reopen. All full profiles passed 27/27 each and TSan passed 20 executions. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -590,14 +591,20 @@ These are deliberate boundaries, not completed features:
 - Kept the LSM allocation policy and persistent table key-byte bookkeeping in the disk state. The common handle retained its original size. `memtable.c` stages aligned chunks before a WAL append, advances the cursor only at publication, and reclaims active and frozen arenas with their trees. Snapshots copy live nodes.
 - V074 passed the memory compatibility fixture, LSM arena and allocator tests, the retryable frozen flush case, and process-kill recovery with both active and frozen arena trees. Final GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release suites passed 26/26 each. TSan passed 20 concurrency executions. P4.1 is DONE.
 
+### Session 028 — 2026-11-27 — Complete P4.2 SSTable block cache
+
+- Started at pushed `85b18ce`. Verified the GCC Debug baseline at 26/26. The test-first build failed on the missing cache setter and stats API.
+- Added `src/storage/block_cache.c`, integrated it with native lookup and scan readers, and added a cache cap to the persistent workspace calculation. Cache hits pin immutable verified data blocks and LRU eviction skips pins. Recovery and compaction validate their own inputs directly from disk. See ADR 0010.
+- V075 passed focused cache, SSTable and read-view tests, all four 27-test full profiles and 20 TSan concurrency executions. The large compaction fixture again stayed below its engine memory cap. P4.2 is DONE. Throughput and release-scale measurement remain in P4.7 and P8.3.
+
 ## 9. Current handoff
 
 - **Current milestone:** P4 — performance and configuration hardening.
-- **Next task ID:** P4.2.
-- **Next action:** Add an opt-in, per-database bounded LRU for verified SSTable data blocks.
-- **Next commands:** Start at `load_block`, `fdb_sst_iter_close` and reader workspace accounting in `src/storage/sstable_reader.c`. Inspect `find_entries` and `scan_open` in `src/core/disk.c` for the live and pinned readers. Add tests for database and file-ID isolation, hit/miss counts, byte-cap admission, pinned eviction, corrupt reads and compaction overlap. Keep recovery validation on disk and charge cache metadata and buffers before admitting them. Run focused SSTable, read-view and allocation-fault tests, then the V074 matrix.
-- **Last verified good checkpoint:** V074 arena support based on `6d16f88`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the original regression and final passes.
-- **Working-tree state:** V074 includes the arena implementation, native API, tests and documentation. Confirm with `git status --short --branch`.
+- **Next task ID:** P4.3.
+- **Next action:** Add a monotonic WAL sync worker for interval durability, then implement bounded group commit with durable acknowledgements.
+- **Next commands:** Inspect `fdb_disk_append`, `fdb_wal_set_sync`, and `fdb_wal_set_rotate`. Add deterministic tests for sync timing and write-error propagation using `FDB_FS_SYNC`. Keep WAL rotation and checkpoint coverage serialized under the engine mutex. Join workers before releasing their WAL or condition state. For group commit, gate the sync to verify no grouped writer returns before it succeeds and verify failures and reopen. Run focused WAL and persistence suites, then the V075 matrix.
+- **Last verified good checkpoint:** V075 block cache based on `85b18ce`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records baseline and final results.
+- **Working-tree state:** V075 includes the block cache, integrations, tests and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, power-loss tests and release-scale verification remain open.
 

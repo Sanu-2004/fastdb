@@ -117,6 +117,16 @@ typedef struct FastDBStats {
     size_t open_iterators;
 } FastDBStats;
 
+typedef struct FastDBBlockCacheStats {
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t evictions;
+    /* Actual cache allocations and the reserved capacity in engine memory. */
+    size_t memory_bytes;
+    size_t max_bytes;
+    size_t entries;
+} FastDBBlockCacheStats;
+
 FASTDB_API const char *fastdb_version(void);
 FASTDB_API const char *fastdb_status_string(FastDBStatus status);
 FASTDB_API void fastdb_free(void *allocation);
@@ -144,10 +154,14 @@ FASTDB_API FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *op
                                                                size_t memtable_bytes);
 /* LSM only. Zero uses individual node allocation; otherwise sets the arena chunk payload. */
 FASTDB_API FastDBStatus fastdb_options_set_lsm_arena(FastDBOptions *options, size_t chunk_bytes);
+/* LSM only. Reserve max_bytes for verified data blocks. Zero disables the cache. */
+FASTDB_API FastDBStatus fastdb_options_set_lsm_block_cache(FastDBOptions *options, size_t max_bytes);
 FASTDB_API FastDBStatus fastdb_open(const FastDBOptions *options, FastDB **out);
 /* Quiesce operations before close. BUSY leaves the handle open. Other results consume it. */
 FASTDB_API FastDBStatus fastdb_close(FastDB *db);
 FASTDB_API FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out);
+/* Reports zero fields when the cache is disabled. Counters reset on open. */
+FASTDB_API FastDBStatus fastdb_block_cache_stats(FastDB *db, FastDBBlockCacheStats *out);
 FASTDB_API FastDBStatus fastdb_flush(FastDB *db);
 FASTDB_API FastDBStatus fastdb_checkpoint(FastDB *db);
 /* Promote matching SSTables to the last level. Active WAL data is left in place. */

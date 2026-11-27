@@ -125,7 +125,10 @@ static void damage_block(const FDBDirectory *dir, bool valid_checksum)
     OK(fdb_fs_close(fd));
 
     FDBSSTReader *reader;
+    FDBBlockCache *cache;
+    OK(fdb_block_cache_create(1024, &cache));
     OK(fdb_sst_reader_open(dir, "damaged", 42, &limits, &reader));
+    fdb_sst_reader_set_cache(reader, cache);
     STATUS(fdb_sst_reader_verify(reader), FASTDB_CORRUPTION);
     FDBSSTIterator *it;
     OK(fdb_sst_iter_open(reader, &it));
@@ -134,6 +137,10 @@ static void damage_block(const FDBDirectory *dir, bool valid_checksum)
     STATUS(fdb_sst_iter_status(it), FASTDB_CORRUPTION);
     fdb_sst_iter_close(it);
     OK(fdb_sst_reader_close(reader));
+    FastDBBlockCacheStats stats;
+    fdb_block_cache_stats(cache, &stats);
+    CHECK(stats.hits == 0 && stats.misses == 2 && stats.entries == 0);
+    fdb_block_cache_destroy(cache);
 
     OK(fdb_dir_open_file(dir, "damaged", FDB_FILE_READ_WRITE, &fd));
     uint64_t size;
@@ -142,6 +149,39 @@ static void damage_block(const FDBDirectory *dir, bool valid_checksum)
     OK(fdb_fs_close(fd));
     STATUS(fdb_sst_reader_open(dir, "damaged", 42, &limits, &reader), FASTDB_CORRUPTION);
     OK(fdb_dir_unlink(dir, "damaged"));
+}
+
+static void hold_cached_iterator(const FDBDirectory *dir)
+{
+    write_table(dir, "cached", &limits);
+    FDBBlockCache *cache;
+    OK(fdb_block_cache_create(320, &cache));
+    FDBSSTReader *reader;
+    OK(fdb_sst_reader_open(dir, "cached", 42, &limits, &reader));
+    fdb_sst_reader_set_cache(reader, cache);
+    FDBSSTIterator *pin, *other;
+    OK(fdb_sst_iter_open(reader, &pin));
+    OK(fdb_sst_iter_open(reader, &other));
+    fdb_sst_iter_first(pin);
+    fdb_sst_iter_first(pin);
+    expect(pin, "a", 7, FDB_PUT);
+    const FDBRecord *held = fdb_sst_iter_current(pin);
+    FastDBSlice key = {"b", 1};
+    fdb_sst_iter_seek(other, key);
+    expect(other, "b", 2, FDB_PUT);
+    CHECK(held->sequence == 7 && memcmp(held->key.data, "a", 1) == 0);
+    FastDBBlockCacheStats stats;
+    fdb_block_cache_stats(cache, &stats);
+    CHECK(stats.hits == 1 && stats.misses == 2 && stats.evictions == 0 && stats.entries == 1);
+    fdb_sst_iter_close(pin);
+    fdb_sst_iter_seek(other, key);
+    expect(other, "b", 2, FDB_PUT);
+    fdb_block_cache_stats(cache, &stats);
+    CHECK(stats.hits == 1 && stats.misses == 3 && stats.evictions == 1 && stats.entries == 1);
+    fdb_sst_iter_close(other);
+    OK(fdb_sst_reader_close(reader));
+    fdb_block_cache_destroy(cache);
+    OK(fdb_dir_unlink(dir, "cached"));
 }
 
 static void bloom_no_false_negatives(void)
@@ -245,6 +285,7 @@ int main(void)
     FDBDirectory dir;
     OK(fdb_dir_lock(path, &fs, &dir));
     seek_and_scan(&dir, &fail_read);
+    hold_cached_iterator(&dir);
     damage_block(&dir, false);
     damage_block(&dir, true);
     bloom_no_false_negatives();

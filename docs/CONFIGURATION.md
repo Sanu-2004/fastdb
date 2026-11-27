@@ -57,6 +57,24 @@ durable table publication. Reopen to change the allocator. WAL and SSTable
 formats are unchanged. To enable the arena or raise its chunk size on an
 existing database, flush before reopening to minimize replay memory use.
 
+### LSM block cache
+
+After selecting LSM, configure the next open with
+`fastdb_options_set_lsm_block_cache(options, max_bytes)`. Zero is the
+default and disables the cache. The engine reserves the full cap from
+`max_memory_bytes` when admitting writes, scans, snapshots and maintenance.
+The cap includes hash buckets, cache bookkeeping, block headers and cached
+data. Configuration requires capacity for cache metadata and room to store
+data. Blocks larger than available capacity use the reader's reserved
+scratch buffer. Reopen to change the cap.
+
+`fastdb_block_cache_stats` reports hits, misses, capacity evictions, entry
+count, allocated bytes, and the configured cap. Counts describe data-block
+lookups after catalog and index selection. A cache miss counts even when
+the disk read fails or the block cannot be retained. Counters saturate at
+`UINT64_MAX` and reset on open. Disabled caches report zero for all fields.
+The cap is already included in `FastDBStats.memory_bytes`.
+
 ### Record expiration
 
 `fastdb_put_with_ttl` and `fastdb_batch_put_with_ttl` accept a duration in

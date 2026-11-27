@@ -3,6 +3,7 @@
 
 #include "fs.h"
 #include "record.h"
+#include "block_cache.h"
 
 typedef struct FDBSSTLimits {
     size_t max_key_bytes;
@@ -56,6 +57,8 @@ FastDBStatus fdb_sst_writer_destroy(FDBSSTWriter *writer);
 
 FastDBStatus fdb_sst_reader_open(const FDBDirectory *dir, const char *name, uint64_t id,
                                   const FDBSSTLimits *limits, FDBSSTReader **out);
+/* Configure before opening iterators. The database owns the cache. */
+void fdb_sst_reader_set_cache(FDBSSTReader *reader, FDBBlockCache *cache);
 const FDBSSTProperties *fdb_sst_reader_properties(const FDBSSTReader *reader);
 size_t fdb_sst_reader_corrupt_partitions(const FDBSSTReader *reader);
 FastDBStatus fdb_sst_reader_verify(const FDBSSTReader *reader);

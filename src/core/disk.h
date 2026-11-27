@@ -41,6 +41,7 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
 FastDBStatus fdb_disk_close(FDBDisk *disk);
 bool fdb_disk_poisoned(const FDBDisk *disk);
 bool fdb_disk_has_tables(const FDBDisk *disk);
+void fdb_disk_cache_stats(const FDBDisk *disk, FastDBBlockCacheStats *out);
 size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk);
 size_t fdb_disk_memtable_key_bytes(const FDBDisk *disk, bool frozen);
 void fdb_disk_set_active_key_bytes(FDBDisk *disk, size_t bytes);
