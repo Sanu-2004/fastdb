@@ -38,6 +38,7 @@ FastDBStatus fdb_lookup_record(const FDBRecord *record, bool copy, FDBLookup *ou
 FastDBStatus fdb_disk_validate(const FastDBOptions *options);
 FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs *fs,
                            const FDBWalReplay *replay, FDBSSTVisit restore);
+FastDBStatus fdb_disk_stop_sync_worker(FDBDisk *disk);
 FastDBStatus fdb_disk_close(FDBDisk *disk);
 bool fdb_disk_poisoned(const FDBDisk *disk);
 bool fdb_disk_has_tables(const FDBDisk *disk);

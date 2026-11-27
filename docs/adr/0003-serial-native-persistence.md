@@ -16,3 +16,14 @@ checkpoint independently of record revisions. An empty checkpoint can
 therefore preserve deletion history without retaining tombstone nodes.
 Automatic checkpoints run before rotation beyond the configured number of
 WAL segments. File publication uses the same transaction order as L0 flush.
+
+## Interval WAL synchronization
+
+The interval worker shares the database mutex with WAL append and
+rotation. It uses the active descriptor directly, keeping the existing
+descriptor budget. It waits until dirty work arrives and schedules sync
+with a monotonic condition. Later appends can join the pending interval.
+Successful sync clears the dirty marker. Recovery treats a replayed
+active segment as potentially dirty unless recovery has already synced a
+tail repair. A sync failure uses the WAL set's existing poisoned state.
+Clean close joins the worker before the last sync and descriptor close.

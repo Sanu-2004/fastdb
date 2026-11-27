@@ -52,7 +52,8 @@ typedef struct FastDBLimits {
 
 typedef enum FastDBDurability {
     FASTDB_DURABILITY_SYNC = 0,
-    FASTDB_DURABILITY_ASYNC = 1
+    FASTDB_DURABILITY_ASYNC = 1,
+    FASTDB_DURABILITY_INTERVAL = 2
 } FastDBDurability;
 
 typedef enum FastDBMode {
@@ -146,6 +147,8 @@ FASTDB_API FastDBStatus fastdb_options_set_eviction(FastDBOptions *options,
 FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
                                                    const char *path,
                                                    const FastDBPersistentOptions *settings);
+/* Interval durability only. Positive milliseconds, default 100 when unset. */
+FASTDB_API FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t milliseconds);
 /* Set after selecting LSM storage. A zero workspace cap uses available engine memory. */
 FASTDB_API FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
                                                       const FastDBCompactionOptions *settings);

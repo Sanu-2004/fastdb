@@ -1214,6 +1214,55 @@ concurrency targets passed five runs each with the V062 workaround.
 The read probe measures data-block operations within the fixture. Cache
 throughput and latency benchmarking remain open.
 
+## P4.3 interval WAL sync checkpoint (V076)
+
+At `7d84d05`, the test-first interval target failed to compile because
+the interval durability policy and option setter were missing. The
+corrected fixture gates the worker's filesystem sync after the caller
+has received its write acknowledgement. It checks the custom 20 ms
+interval in LSM and the default 100 ms interval in persistent memory.
+An injected worker sync failure causes `FASTDB_COMMIT_UNCERTAIN` on the
+next read, write and close. Reopen recovers the written frame on the
+test filesystem and confirms the rejected follow-up write is absent.
+
+A long configured interval lets the test stop the worker before its
+deadline. Close syncs the pending frame, including a case that injects
+failure into the close sync. A three-write fixture forces WAL rotation
+before the deadline, observes foreground sync during rotation, confirms
+one final sync on close, and checks all three revisions after reopen.
+These fault tests exercise observed I/O and recovery behavior on Docker's
+filesystem. They do not establish a power-loss window.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p43-interval-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-interval-red --target fastdb_interval_sync --parallel 6
+CC=gcc cmake -S /repo -B /tmp/p43-interval-green -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-interval-green --parallel 6
+ctest --test-dir /tmp/p43-interval-green -R '^fastdb_interval_sync$' --repeat until-fail:10 --output-on-failure
+ctest --test-dir /tmp/p43-interval-green -R '^fastdb_wal' --output-on-failure
+ctest --test-dir /tmp/p43-interval-green -R '^fastdb_lsm_fault$' --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-interval-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p43-interval-gcc --parallel 6
+ctest --test-dir /tmp/p43-interval-gcc -R '^fastdb_interval_sync$' --repeat until-fail:10 --output-on-failure
+ctest --test-dir /tmp/p43-interval-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p43-interval-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p43-interval-clang --parallel 6
+ctest --test-dir /tmp/p43-interval-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-interval-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p43-interval-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p43-interval-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p43-interval-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p43-interval-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p43-interval-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The focused interval target passed ten final executions. WAL and WAL set
+passed 2/2 and LSM fault passed 1/1. Each full profile passed 28/28,
+including the Release tests in `docker build -t fastdb-native:local .`.
+The V062 TSan workaround passed five concurrency targets five times each.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

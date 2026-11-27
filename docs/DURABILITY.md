@@ -28,17 +28,24 @@ current implementation.
 
 The WAL segment writer syncs the new file and directory before making the
 segment available. A synchronous append acknowledges after successful file
-sync. An asynchronous append acknowledges once the whole frame is written
-and can lose recent data if the system fails. An append or sync error poisons
-the open segment and returns `FASTDB_COMMIT_UNCERTAIN`. Reopen determines
-whether the affected batch is present. Callers must preserve original files
-and their catalog references through an uncertain outcome.
+sync. Async and interval append acknowledge once the whole frame is
+written. Either policy can lose recent data if the system fails before
+sync. With interval durability, one worker uses a monotonic deadline when
+it sees unsynced frames and syncs the active WAL when the deadline expires.
+The interval is best-effort. Lock contention, scheduling delays, and
+filesystem stalls can extend the time to durability. WAL rotation still
+syncs the previous segment before sealing it. An append or sync error
+poisons the handle. Reopen determines whether the affected batch is
+present. Callers must preserve original files and catalog references
+through an uncertain outcome.
 
 The native persistent handle rejects further reads and writes after a
 commit or manifest outcome becomes uncertain. Close releases the handle.
-Reopen to determine whether the mutation is present. Clean close syncs
-asynchronous WAL writes and reports failure. Group commit and periodic WAL
-sync policies remain pending.
+Reopen to determine whether the mutation is present. A failed interval
+worker sync causes subsequent reads, writes, and close to return
+`FASTDB_COMMIT_UNCERTAIN`. Clean close joins the worker and syncs pending
+frames. Async close also syncs and reports errors. Group commit remains
+pending.
 
 Persistent options can set `min_free_bytes` as an advisory free-space
 headroom floor. Before WAL append, FastDB checks `statvfs` available bytes

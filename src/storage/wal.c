@@ -123,7 +123,11 @@ static FastDBStatus recover_payload(FDBWal *wal, size_t length, size_t count, ui
 static FastDBStatus repair_tail(FDBWal *wal)
 {
     FastDBStatus status = fdb_fs_truncate(&wal->fs, wal->fd, wal->offset);
-    return status == FASTDB_OK ? fdb_fs_sync(&wal->fs, wal->fd) : status;
+    if (status == FASTDB_OK)
+        status = fdb_fs_sync(&wal->fs, wal->fd);
+    if (status == FASTDB_OK)
+        wal->dirty = false;
+    return status;
 }
 
 static FastDBStatus scan_wal(FDBWal *wal, uint64_t file_size, FDBWalTail tail,
@@ -162,6 +166,7 @@ static FastDBStatus scan_wal(FDBWal *wal, uint64_t file_size, FDBWalTail tail,
             return status;
         wal->offset += sizeof(header) + length;
         wal->sequence += count;
+        wal->dirty = true;
     }
     return FASTDB_OK;
 }
@@ -224,8 +229,10 @@ FastDBStatus fdb_wal_sync(FDBWal *wal)
 {
     if (wal->poisoned)
         return FASTDB_COMMIT_UNCERTAIN;
-    if (fdb_fs_sync(&wal->fs, wal->fd) == FASTDB_OK)
+    if (fdb_fs_sync(&wal->fs, wal->fd) == FASTDB_OK) {
+        wal->dirty = false;
         return FASTDB_OK;
+    }
     wal->poisoned = true;
     return FASTDB_COMMIT_UNCERTAIN;
 }
@@ -268,6 +275,7 @@ FastDBStatus fdb_wal_append(FDBWal *wal, const FDBRecord *records, size_t count,
         wal->poisoned = true;
         return FASTDB_COMMIT_UNCERTAIN;
     }
+    wal->dirty = true;
     if (durable && fdb_wal_sync(wal) != FASTDB_OK)
         return FASTDB_COMMIT_UNCERTAIN;
     wal->offset += length;

@@ -136,7 +136,7 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 
 | Persistent setting | Default | Scope |
 |---|---:|---|
-| `durability` | sync | WAL acknowledgement policy |
+| `durability` | sync | WAL acknowledgement policy. Supported persistent policies are sync, async, and interval. |
 | `max_wal_segment_bytes` | 64 MiB | One WAL segment, including header |
 | `max_wal_frame_bytes` | 32 MiB | One atomic WAL frame, including header |
 | `target_block_bytes` | 16 KiB | Target SSTable or checkpoint block size |
@@ -148,6 +148,13 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 | `checkpoint_wal_segments` | 0 | Persistent memory uses up to eight segments, bounded by the catalog limit. A nonzero value configures the threshold. LSM requires zero. |
 | `min_free_bytes` | 0 | Minimum filesystem-available bytes to preserve after a WAL append or estimated flush, checkpoint, or compaction output. Zero disables the check. |
 | `max_open_files` | 256 | Per-database descriptor budget used to cap compaction readers. Persistent memory requires at least 5 and LSM at least 10. |
+
+Select `FASTDB_DURABILITY_INTERVAL` for either persistent mode to start
+one WAL sync worker. `fastdb_options_set_wal_interval` accepts a positive
+`uint32_t` number of milliseconds after selecting that policy. The default
+interval is 100 ms and changes apply on reopen. Interval acknowledgements
+follow WAL writes, with later sync on a monotonic deadline. See
+[durability](DURABILITY.md) for the failure and scheduling contract.
 
 Persistent memory needs five slots during WAL rotation for the directory,
 lock, current WAL, replacement WAL, and temporary manifest. Increase any

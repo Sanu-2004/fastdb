@@ -1,6 +1,7 @@
 #include "disk.h"
 #include "compaction.h"
 #include "flush.h"
+#include "interval_sync.h"
 #include "recovery.h"
 #include "sstable_format.h"
 
@@ -10,6 +11,7 @@
 struct FDBDisk {
     size_t compaction_bytes;
     FDBBlockCache *block_cache;
+    FDBIntervalSync *interval_sync;
     size_t arena_chunk_bytes;
     size_t active_key_bytes;
     size_t frozen_key_bytes;
@@ -45,6 +47,8 @@ static const FastDBPersistentOptions defaults = {
     .min_free_bytes = 0,
     .max_open_files = 256,
 };
+
+enum { DEFAULT_SYNC_INTERVAL_MS = 100 };
 
 void fastdb_persistent_options_default(FastDBPersistentOptions *options)
 {
@@ -86,7 +90,10 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     size_t record, block;
     /* WAL rotation can hold the directory, lock, two WALs and temporary manifest. */
     size_t minimum_open_files = options->mode == FASTDB_MODE_LSM ? 10 : 5;
-    if ((storage->durability != FASTDB_DURABILITY_SYNC && storage->durability != FASTDB_DURABILITY_ASYNC) ||
+    if ((storage->durability != FASTDB_DURABILITY_SYNC &&
+         storage->durability != FASTDB_DURABILITY_ASYNC &&
+         storage->durability != FASTDB_DURABILITY_INTERVAL) ||
+        (storage->durability != FASTDB_DURABILITY_INTERVAL && options->sync_interval_ms != 0) ||
         storage->max_catalog_files < 2 ||
         storage->max_open_files < minimum_open_files ||
         storage->checkpoint_wal_segments >= storage->max_catalog_files ||
@@ -155,6 +162,9 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
         (options->mode != FASTDB_MODE_LSM ||
          !fdb_block_cache_valid_limit(options->block_cache_bytes) ||
          !fdb_add_size(*workspace, options->block_cache_bytes, workspace)))
+        return FASTDB_INVALID_ARGUMENT;
+    if (storage->durability == FASTDB_DURABILITY_INTERVAL &&
+        !fdb_add_size(*workspace, fdb_interval_sync_workspace(), workspace))
         return FASTDB_INVALID_ARGUMENT;
     size_t smallest_node;
     size_t available = limits->max_memory_bytes - sizeof(FastDB);
@@ -270,6 +280,13 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
                  fdb_checkpoint_recover(&disk->dir, &disk->manifest, &disk->wal, &disk->table,
                                          replay, restore, &disk->log);
     }
+    if (status == FASTDB_OK && disk->durability == FASTDB_DURABILITY_INTERVAL) {
+        uint32_t interval = options->sync_interval_ms == 0 ? DEFAULT_SYNC_INTERVAL_MS :
+                            options->sync_interval_ms;
+        status = fdb_interval_sync_start(&disk->log, &db->mutex, interval, &disk->interval_sync);
+        if (status != FASTDB_OK)
+            (void)fdb_wal_set_close(&disk->log);
+    }
     if (status != FASTDB_OK) {
         db->disk = NULL;
         (void)fdb_dir_close(&disk->dir);
@@ -281,12 +298,18 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
     return FASTDB_OK;
 }
 
+FastDBStatus fdb_disk_stop_sync_worker(FDBDisk *disk)
+{
+    return disk == NULL ? FASTDB_OK : fdb_interval_sync_stop(&disk->interval_sync);
+}
+
 FastDBStatus fdb_disk_close(FDBDisk *disk)
 {
     if (disk == NULL)
         return FASTDB_OK;
-    FastDBStatus status = disk->durability == FASTDB_DURABILITY_ASYNC ?
-                          fdb_wal_set_sync(&disk->log) : FASTDB_OK;
+    bool sync = disk->durability == FASTDB_DURABILITY_ASYNC ||
+                (disk->durability == FASTDB_DURABILITY_INTERVAL && disk->log.wal.dirty);
+    FastDBStatus status = sync ? fdb_wal_set_sync(&disk->log) : FASTDB_OK;
     if (status == FASTDB_OK && disk->log.reclaim_pending)
         status = fdb_storage_prepare_maintenance(&disk->log);
     FastDBStatus wal_status = fdb_wal_set_close(&disk->log);
@@ -398,7 +421,10 @@ FastDBStatus fdb_disk_append(FDBDisk *disk, const FDBRecord *records, size_t cou
         status = check_free_space(disk, reservation);
     if (status != FASTDB_OK)
         return status;
-    return fdb_wal_set_append(&disk->log, records, count, disk->durability == FASTDB_DURABILITY_SYNC);
+    status = fdb_wal_set_append(&disk->log, records, count, disk->durability == FASTDB_DURABILITY_SYNC);
+    if (status == FASTDB_OK)
+        fdb_interval_sync_notify(disk->interval_sync);
+    return status;
 }
 
 FastDBStatus fdb_lookup_record(const FDBRecord *record, bool copy, FDBLookup *out)

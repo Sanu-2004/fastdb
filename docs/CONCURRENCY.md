@@ -131,6 +131,14 @@ reads the immutable tree until it reacquires the mutex to publish the
 SSTable. A failed publication keeps the frozen chunks for retry. Snapshot
 memtable copies have independent storage.
 
+Interval durability starts one WAL sync worker per database. The worker
+sleeps on a monotonic condition when it sees pending frames, and waits
+without a timer when the WAL is clean. The engine mutex serializes the sync
+with append, rotation, and catalog publication. It is released while the
+worker waits and held during the filesystem sync. Close wakes and joins
+the worker before freeing storage and completes any pending sync. A
+background sync error poisons the handle under the same mutex.
+
 When the optional flush worker publishes an L0 table, it queues one automatic
 compaction on the same per-database worker. The worker tracks flush and
 compaction errors separately: a failed compaction does not mark a successfully

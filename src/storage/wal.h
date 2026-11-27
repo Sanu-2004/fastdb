@@ -21,6 +21,7 @@ typedef struct FDBWal {
     uint64_t offset;
     uint64_t sequence;
     bool poisoned;
+    bool dirty;
 } FDBWal;
 
 typedef enum FDBWalTail { FDB_WAL_SEALED, FDB_WAL_REPAIR_TAIL } FDBWalTail;

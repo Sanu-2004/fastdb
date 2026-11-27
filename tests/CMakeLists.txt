@@ -56,6 +56,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     fastdb_test(fastdb_public_crash native/public_crash.c fastdb_static "integration;recovery")
     target_include_directories(fastdb_public_crash PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
         "${PROJECT_SOURCE_DIR}/src/storage")
+    fastdb_test(fastdb_interval_sync native/interval_sync.c fastdb_static
+        "integration;concurrency;recovery;fault")
+    target_include_directories(fastdb_interval_sync PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
+        "${PROJECT_SOURCE_DIR}/src/storage")
     fastdb_test(fastdb_merge native/merge.c fastdb_static "integration;fault")
     target_include_directories(fastdb_merge PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
         "${PROJECT_SOURCE_DIR}/src/storage")

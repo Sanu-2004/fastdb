@@ -203,6 +203,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->flush_threshold = 0;
         options->arena_chunk_bytes = 0;
         options->block_cache_bytes = 0;
+        options->sync_interval_ms = 0;
         fastdb_compaction_options_default(&options->compaction);
         return FASTDB_OK;
     }
@@ -216,11 +217,14 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         next.flush_threshold = 0;
         next.arena_chunk_bytes = 0;
         next.block_cache_bytes = 0;
+        next.sync_interval_ms = 0;
     }
     if (settings == NULL)
         fastdb_persistent_options_default(&next.storage);
     else
         next.storage = *settings;
+    if (next.storage.durability != FASTDB_DURABILITY_INTERVAL)
+        next.sync_interval_ms = 0;
     FastDBStatus status = fdb_disk_validate(&next);
     if (status != FASTDB_OK)
         return status;
@@ -235,6 +239,16 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->flush_threshold = next.flush_threshold;
     options->arena_chunk_bytes = next.arena_chunk_bytes;
     options->block_cache_bytes = next.block_cache_bytes;
+    options->sync_interval_ms = next.sync_interval_ms;
+    return FASTDB_OK;
+}
+
+FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t milliseconds)
+{
+    if (options == NULL || options->path == NULL || milliseconds == 0 ||
+        options->storage.durability != FASTDB_DURABILITY_INTERVAL)
+        return FASTDB_INVALID_ARGUMENT;
+    options->sync_interval_ms = milliseconds;
     return FASTDB_OK;
 }
 
@@ -397,6 +411,7 @@ FastDBStatus fdb_open_with_fs(const FastDBOptions *options, const FDBFs *fs, Fas
         if (status == FASTDB_OK)
             status = start_flush_worker(db, options->flush_threshold);
         if (status != FASTDB_OK) {
+            (void)fdb_disk_stop_sync_worker(db->disk);
             (void)fdb_disk_close(db->disk);
             fdb_tree_destroy(&db->tree);
             pthread_mutex_destroy(&db->mutex);
@@ -443,7 +458,7 @@ FastDBStatus fastdb_close(FastDB *db)
         free(flush);
         db->flush = NULL;
     }
-    if (pthread_mutex_destroy(&db->mutex) != 0)
+    if (fdb_disk_stop_sync_worker(db->disk) != FASTDB_OK || pthread_mutex_destroy(&db->mutex) != 0)
         return FASTDB_BUSY;
     FastDBStatus status = fdb_disk_close(db->disk);
     fdb_tree_destroy(&db->tree);

@@ -14,6 +14,7 @@ struct FastDBOptions {
     size_t flush_threshold;
     size_t arena_chunk_bytes;
     size_t block_cache_bytes;
+    uint32_t sync_interval_ms;
     FastDBEvictionPolicy eviction_policy;
     size_t max_live_bytes;
 };
