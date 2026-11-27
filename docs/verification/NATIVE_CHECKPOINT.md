@@ -1063,6 +1063,52 @@ setarch x86_64 -R ctest --test-dir /tmp/p310-mask-tsan -L concurrency --repeat u
 On the host, `docker build -t fastdb-native:local .` ran the release
 suite in the Dockerfile.
 
+## P3.11 multilevel compaction under a fixed engine memory cap (V073)
+
+Starting at `281405e`, `merge_larger_than_memory` wrote 140 distinct
+binary keys with 2 KiB values and one overlapping marker key. It flushed
+ten runs to L0 and promoted them through L1 into a growing L2 run. An
+additional PUT and DELETE built an overlapping L1 run. The fixture checked
+the installed catalog, then paused the final L1/L2 merge on an output write
+while a separate thread read, overwrote a key, and deleted another.
+
+The selected inputs totalled 300,067 bytes and the final L2 file contained
+295,577 bytes. Against a 262,144-byte engine memory limit, the GCC Debug
+fixture measured 81,963 charged bytes before merge, 253,327 during merge,
+and 253,497 with both foreground mutations staged in the active tree. These
+are samples of the engine's reserved and allocated bytes. Process RSS and
+release-scale measurement are tracked separately in P8.3. The pre-merge
+snapshot retained the old update and deleted value. Live reads reflected
+the foreground changes. Reopen validated all keys and the final revision.
+`fastdb_public_crash` reran the existing process-kill publication fixtures.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p311-focus -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p311-focus --parallel 6
+ctest --test-dir /tmp/p311-focus -R '^fastdb_read_view$' --timeout 30 -V
+CC=gcc cmake -S /repo -B /tmp/p311-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p311-gcc --parallel 6
+ctest --test-dir /tmp/p311-gcc -R '^fastdb_read_view$' -V
+ctest --test-dir /tmp/p311-gcc -R '^fastdb_compaction$' --output-on-failure
+ctest --test-dir /tmp/p311-gcc -R '^fastdb_public_crash$' --output-on-failure
+ctest --test-dir /tmp/p311-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p311-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p311-clang --parallel 6
+ctest --test-dir /tmp/p311-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p311-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p311-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p311-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p311-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p311-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p311-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The focused cases passed 1/1 each. The full profiles and the host's
+`docker build -t fastdb-native:local .` passed 26/26 each. The TSan profile
+ran four concurrency targets five times each with the V062 workaround.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

@@ -1,7 +1,9 @@
 #include "disk_fixture.h"
 #include "engine.h"
+#include "manifest.h"
 
 #include <errno.h>
+#include <inttypes.h>
 
 typedef struct ReadGate {
     pthread_mutex_t mutex;
@@ -309,6 +311,155 @@ static void snapshot_during_mask_reclamation(void)
     remove_disk_fixture(path);
 }
 
+static uint64_t verify_merge_levels(const char *path, const FastDBOptions *options,
+                                    bool after_merge)
+{
+    FDBDirectory directory;
+    OK(fdb_dir_lock(path, NULL, &directory));
+    const FDBManifestLimits limits = {options->storage.max_catalog_files,
+                                      options->storage.max_catalog_bytes,
+                                      options->limits.max_key_bytes, 3};
+    FDBManifestLoad catalog;
+    OK(fdb_manifest_load(&directory, &limits, &catalog));
+    size_t counts[3] = {0};
+    uint64_t bytes = 0;
+    for (size_t i = 0; i < catalog.view.count; ++i) {
+        const FDBManifestEntry *entry = &catalog.view.entries[i];
+        if (entry->kind != FDB_FILE_SSTABLE)
+            continue;
+        CHECK(entry->level < 3);
+        ++counts[entry->level];
+        bytes += entry->bytes;
+    }
+    CHECK(counts[0] == 0 && counts[1] == (after_merge ? 0U : 1U) && counts[2] == 1);
+    fdb_manifest_release(&catalog);
+    OK(fdb_dir_close(&directory));
+    return bytes;
+}
+
+static void merge_larger_than_memory(void)
+{
+    enum { records_per_flush = 14, flushes = 10, records = records_per_flush * flushes };
+    const size_t memory_cap = 256 * 1024;
+    const uint64_t initial_revision = records + flushes;
+    char path[] = "/tmp/fastdb-large-merge.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options;
+    OK(fastdb_options_create(&options));
+    FastDBLimits limits;
+    fastdb_limits_default(&limits);
+    limits.max_memory_bytes = memory_cap;
+    limits.max_key_bytes = 32;
+    unsigned char payload[2048];
+    memset(payload, 0xDB, sizeof(payload));
+    limits.max_value_bytes = sizeof(payload);
+    OK(fastdb_options_set_limits(options, &limits));
+    FastDBPersistentOptions storage;
+    fastdb_persistent_options_default(&storage);
+    storage.max_wal_segment_bytes = 64 * 1024;
+    storage.max_wal_frame_bytes = 8 * 1024;
+    storage.target_block_bytes = 4 * 1024;
+    storage.max_index_bytes = 12 * 1024;
+    storage.max_filter_bytes = 8 * 1024;
+    storage.max_catalog_files = 16;
+    storage.max_catalog_bytes = 2048;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 3;
+    policy.level0_file_trigger = 1;
+    policy.level1_bytes = 512 * 1024;
+    policy.target_file_bytes = 512 * 1024;
+    OK(fastdb_options_set_compaction(options, &policy));
+
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    for (unsigned int i = 0; i < records; ++i) {
+        const unsigned char key[] = {'k', (unsigned char)i};
+        payload[0] = (unsigned char)i;
+        OK(fastdb_put(db, key, sizeof(key), payload, sizeof(payload)));
+        if ((i + 1) % records_per_flush == 0) {
+            /* Keep successive runs overlapping as the last-level table grows. */
+            OK(fastdb_put(db, "z", 1, NULL, 0));
+            OK(fastdb_flush(db));
+            OK(fastdb_compact(db));
+        }
+    }
+    const unsigned char update[] = {'k', 0}, deleted[] = {'k', 1}, concurrent[] = {'k', 2};
+    OK(fastdb_put(db, update, sizeof(update), "before", 6));
+    OK(fastdb_delete(db, deleted, sizeof(deleted)));
+    /* Automatic promotion leaves the new run in L1, overlapping the L2 run. */
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    uint64_t input_bytes = verify_merge_levels(path, options, false);
+    CHECK(input_bytes > memory_cap);
+
+    ReadGate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
+                     .foreground = pthread_self(), .writes_until_pause = 2};
+    const FDBFs fs = {hold_open, &gate};
+    OK(fdb_open_with_fs(options, &fs, &db));
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    CHECK(fastdb_snapshot_revision(snapshot) == initial_revision + 2);
+    FastDBStats before, merging, during;
+    OK(fastdb_stats(db, &before));
+    pthread_t compactor;
+    CHECK(pthread_create(&compactor, NULL, compact_db, db) == 0);
+    wait_read(&gate);
+    OK(fastdb_stats(db, &merging));
+    CHECK(merging.memory_bytes > before.memory_bytes && merging.memory_bytes <= memory_cap);
+    expect_value(db, (FastDBSlice){update, sizeof(update)}, (FastDBSlice){"before", 6},
+                 initial_revision + 1);
+    expect_missing(db, (FastDBSlice){deleted, sizeof(deleted)});
+    OK(fastdb_put(db, update, sizeof(update), "during", 6));
+    OK(fastdb_delete(db, concurrent, sizeof(concurrent)));
+    OK(fastdb_stats(db, &during));
+    CHECK(during.record_count == 2 && during.memory_bytes > merging.memory_bytes &&
+          during.memory_bytes <= memory_cap);
+    finish_read(&gate, compactor);
+
+    void *value;
+    size_t size;
+    uint64_t revision;
+    OK(fastdb_snapshot_get(snapshot, update, sizeof(update), &value, &size, &revision));
+    CHECK(size == 6 && memcmp(value, "before", 6) == 0 && revision == initial_revision + 1);
+    fastdb_free(value);
+    OK(fastdb_snapshot_get(snapshot, concurrent, sizeof(concurrent), &value, &size, &revision));
+    payload[0] = 2;
+    CHECK(size == sizeof(payload) && memcmp(value, payload, size) == 0 && revision == 3);
+    fastdb_free(value);
+    fastdb_snapshot_release(snapshot);
+    expect_value(db, (FastDBSlice){update, sizeof(update)}, (FastDBSlice){"during", 6},
+                 initial_revision + 3);
+    expect_missing(db, (FastDBSlice){concurrent, sizeof(concurrent)});
+    OK(fastdb_close(db));
+    destroy_gate(&gate);
+    uint64_t output_bytes = verify_merge_levels(path, options, true);
+    CHECK(output_bytes > memory_cap);
+    printf("streaming merge bytes: inputs=%" PRIu64 " output=%" PRIu64
+           " memory before=%zu merge=%zu with foreground writes=%zu limit=%zu\n",
+           input_bytes, output_bytes, before.memory_bytes, merging.memory_bytes,
+           during.memory_bytes, memory_cap);
+
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){update, sizeof(update)}, (FastDBSlice){"during", 6},
+                 initial_revision + 3);
+    expect_missing(db, (FastDBSlice){deleted, sizeof(deleted)});
+    expect_missing(db, (FastDBSlice){concurrent, sizeof(concurrent)});
+    for (unsigned int i = 3; i < records; ++i) {
+        const unsigned char key[] = {'k', (unsigned char)i};
+        payload[0] = (unsigned char)i;
+        expect_value(db, (FastDBSlice){key, sizeof(key)}, (FastDBSlice){payload, sizeof(payload)},
+                     i + i / records_per_flush + 1);
+    }
+    expect_value(db, (FastDBSlice){"z", 1}, (FastDBSlice){0}, initial_revision);
+    OK(fastdb_stats(db, &during));
+    CHECK(during.revision == initial_revision + 4 && during.memory_bytes <= memory_cap);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     across_compaction(false);
@@ -316,4 +467,5 @@ int main(void)
     across_background_flush();
     writes_during_compaction();
     snapshot_during_mask_reclamation();
+    merge_larger_than_memory();
 }
