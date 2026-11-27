@@ -9,7 +9,7 @@ and can be freed afterward. Pass `NULL` to open or batch creation to use default
 |---|---:|---|
 | `max_key_bytes` | 65,536 | One nonempty key |
 | `max_value_bytes` | 16 MiB | One value |
-| `max_memory_bytes` | 64 MiB | DB handle, tree nodes, copied pages, snapshot copies and transient commit allocations |
+| `max_memory_bytes` | 64 MiB | DB handle, tree allocations, copied pages, snapshot copies and transient commit allocations |
 | `max_batch_operations` | 10,000 | Mutations plus conditions in one batch |
 | `max_batch_bytes` | 32 MiB | One batch handle, copied inputs and per-entry metadata |
 | `max_scan_records` | 10,000 | Requested record count per scan page |
@@ -20,9 +20,10 @@ Key and value length limits fit unsigned 32-bit fields. Other options must
 leave room for their own minimum metadata. A valid length is also subject to
 the operation's aggregate budgets. The implementation can refuse a large
 record or a replacement that would exhaust temporary headroom when the
-current value and its staged replacement must coexist. Delete releases a
-node without allocating. When a page exceeds its byte budget, the scan
-returns `FASTDB_LIMIT_EXCEEDED`; retrying with a smaller record count may help.
+current value and its staged replacement must coexist. In memory modes,
+delete releases a node without allocating. A scan that exceeds its page
+byte budget returns `FASTDB_LIMIT_EXCEEDED`. Retrying with a smaller record
+count may help.
 A record larger than a whole page remains accessible through GET.
 
 All storage modes allow one open snapshot per database. Capture returns
@@ -36,6 +37,25 @@ and compaction can continue. Only captured SSTables are retained after
 retirement. Release makes those files eligible for cleanup on the next
 maintenance operation or close. An LSM page also budgets two key buffers
 of at most `max_key_bytes` each and uses the reserved table reader workspace.
+
+### LSM memtable arena
+
+After selecting LSM, `fastdb_options_set_lsm_arena(options, chunk_bytes)`
+configures the allocator for the next open. Zero selects individual node
+allocations and is the default. A nonzero value sets the minimum payload
+capacity of each chunk. A larger batch can allocate one chunk sized for
+all of its final mutations. The memory cap charges headers, alignment
+padding, unused chunk capacity, and space held by overwritten nodes.
+Frozen chunks stay charged until the corresponding SSTable is published.
+Snapshot captures copy live records into independently owned nodes.
+
+The background flush threshold counts full chunks. Set it and the chunk
+size with room for WAL staging and application work within the memory cap.
+If the next chunk cannot fit, a write returns `FASTDB_LIMIT_EXCEEDED` before
+appending to the WAL. A manual flush releases the active arena after
+durable table publication. Reopen to change the allocator. WAL and SSTable
+formats are unchanged. To enable the arena or raise its chunk size on an
+existing database, flush before reopening to minimize replay memory use.
 
 ### Record expiration
 

@@ -131,9 +131,12 @@ static FastDBBatch *update_while_frozen(FastDB *db)
     FastDBStats stats;
     OK(fastdb_stats(db, &stats));
     CHECK(stats.record_count == 7 && stats.revision == 7 && stats.memory_bytes <= 128 * 1024);
-    size_t accounted = sizeof(*db) + db->tree.bytes + db->flush->frozen.bytes +
-                       db->iterator_bytes + db->reserved_bytes;
+    size_t active = fdb_tree_memory_bytes(&db->tree);
+    size_t frozen = fdb_tree_memory_bytes(&db->flush->frozen);
+    size_t accounted = sizeof(*db) + active + frozen + db->iterator_bytes + db->reserved_bytes;
     CHECK(stats.memory_bytes == accounted);
+    if (db->tree.arena != NULL)
+        CHECK(active > db->tree.bytes && frozen > db->flush->frozen.bytes);
     return batch;
 }
 
@@ -147,11 +150,20 @@ static void check_visible(FastDB *db)
     expect_missing(db, (FastDBSlice){"q", 1});
 }
 
-static void concurrent_build(int error)
+static void enable_background_arena(FastDBOptions *options)
+{
+    /* Two ordinary values fit in one chunk. The third crosses the flush threshold. */
+    OK(fastdb_options_set_lsm_arena(options, 512));
+    OK(fastdb_options_set_lsm_flush_threshold(options, 768));
+}
+
+static void concurrent_build(int error, bool arena)
 {
     char path[] = "/tmp/fastdb-bg-build.XXXXXXXX";
     CHECK(mkdtemp(path) != NULL);
     FastDBOptions *options = background_options(path);
+    if (arena)
+        enable_background_arena(options);
     Gate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
                  .foreground = pthread_self(), .operation = FDB_FS_WRITE, .remaining = 5,
                  .error = error};
@@ -217,11 +229,13 @@ static void concurrent_build(int error)
     remove_disk_fixture(path);
 }
 
-static void crash_during_build(void)
+static void crash_during_build(bool arena)
 {
     char path[] = "/tmp/fastdb-bg-crash.XXXXXXXX";
     CHECK(mkdtemp(path) != NULL);
     FastDBOptions *options = background_options(path);
+    if (arena)
+        enable_background_arena(options);
     int channel[2];
     CHECK(pipe(channel) == 0);
     pid_t child = fork();
@@ -671,13 +685,15 @@ static void close_reports_unretried_compaction_error(void)
 int main(void)
 {
     aggregate_memory_limit();
-    concurrent_build(0);
-    concurrent_build(ENOSPC);
+    concurrent_build(0, false);
+    concurrent_build(ENOSPC, false);
+    concurrent_build(ENOSPC, true);
     failed_rotation_keeps_active();
     close_during_build();
     worker_schedules_compaction_after_flush();
     close_drains_background_compaction();
     failed_background_compaction_keeps_l0_flush();
     close_reports_unretried_compaction_error();
-    crash_during_build();
+    crash_during_build(false);
+    crash_during_build(true);
 }

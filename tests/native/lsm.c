@@ -139,9 +139,121 @@ static void bounded_memtable(void)
     remove_disk_fixture(path);
 }
 
+static void bounded_arena(void)
+{
+    char path[] = "/tmp/fastdb-lsm-arena.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDB *db;
+    STATUS(fastdb_options_set_lsm_arena(options, SIZE_MAX), FASTDB_INVALID_ARGUMENT);
+    STATUS(fastdb_options_set_lsm_arena(NULL, 4096), FASTDB_INVALID_ARGUMENT);
+
+    FastDBOptions *memory;
+    OK(fastdb_options_create(&memory));
+    STATUS(fastdb_options_set_lsm_arena(memory, 4096), FASTDB_INVALID_ARGUMENT);
+    fastdb_options_destroy(memory);
+
+    const size_t chunk = 64 * 1024;
+    OK(fastdb_options_set_lsm_arena(options, chunk));
+    OK(fastdb_open(options, &db));
+    FastDBStats empty, first, updated, snapshot_stats;
+    OK(fastdb_stats(db, &empty));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_stats(db, &first));
+    CHECK(first.memory_bytes >= empty.memory_bytes + chunk && first.revision == 1);
+    OK(fastdb_put(db, "a", 1, "new", 3));
+    OK(fastdb_stats(db, &updated));
+    CHECK(first.memory_bytes == updated.memory_bytes && updated.record_count == 1);
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    OK(fastdb_stats(db, &snapshot_stats));
+    CHECK(snapshot_stats.memory_bytes > updated.memory_bytes &&
+          snapshot_stats.memory_bytes - updated.memory_bytes < chunk);
+
+    FastDBBatch *batch;
+    OK(fastdb_batch_create(options, &batch));
+    OK(fastdb_batch_delete(batch, "a", 1));
+    OK(fastdb_batch_put(batch, "b", 1, "B", 1));
+    OK(fastdb_batch_commit(db, batch));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){"B", 1}, 4);
+    fastdb_batch_destroy(batch);
+
+    OK(fastdb_flush(db));
+    OK(fastdb_stats(db, &updated));
+    CHECK(updated.memory_bytes == empty.memory_bytes +
+          (snapshot_stats.memory_bytes - first.memory_bytes));
+    void *value;
+    size_t bytes;
+    uint64_t revision;
+    OK(fastdb_snapshot_get(snapshot, "a", 1, &value, &bytes, &revision));
+    CHECK(bytes == 3 && revision == 2 && memcmp(value, "new", 3) == 0);
+    fastdb_free(value);
+    fastdb_snapshot_release(snapshot);
+
+    OK(fastdb_put(db, "b", 1, "wal", 3));
+    OK(fastdb_close(db));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_stats(db, &updated));
+    CHECK(updated.revision == 5 && updated.memory_bytes == first.memory_bytes);
+    expect_missing(db, (FastDBSlice){"a", 1});
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){"wal", 3}, 5);
+    OK(fastdb_close(db));
+
+    OK(fastdb_options_set_lsm_arena(options, 0));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_stats(db, &updated));
+    CHECK(updated.memory_bytes < first.memory_bytes);
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){"wal", 3}, 5);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void arena_rejects_growth_until_flush(void)
+{
+    char path[] = "/tmp/fastdb-arena-limit.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    OK(fastdb_options_set_lsm_arena(options, 256));
+    FastDB *db;
+    char payload[120] = {1};
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, payload, sizeof(payload)));
+    FastDBStats full, after;
+    OK(fastdb_stats(db, &full));
+    OK(fastdb_close(db));
+
+    FastDBLimits limits;
+    fastdb_limits_default(&limits);
+    limits.max_key_bytes = 32;
+    limits.max_value_bytes = 128;
+    limits.max_batch_operations = 6;
+    limits.max_memory_bytes = full.memory_bytes + 220;
+    OK(fastdb_options_set_limits(options, &limits));
+    OK(fastdb_open(options, &db));
+    payload[0] = 2;
+    STATUS(fastdb_put(db, "a", 1, payload, sizeof(payload)), FASTDB_LIMIT_EXCEEDED);
+    OK(fastdb_stats(db, &after));
+    CHECK(after.revision == 1 && after.memory_bytes == full.memory_bytes);
+    payload[0] = 1;
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){payload, sizeof(payload)}, 1);
+    OK(fastdb_flush(db));
+    payload[0] = 2;
+    OK(fastdb_put(db, "a", 1, payload, sizeof(payload)));
+    OK(fastdb_close(db));
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){payload, sizeof(payload)}, 2);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     reopen_and_flush();
     check_initialization();
     bounded_memtable();
+    bounded_arena();
+    arena_rejects_growth_until_flush();
 }

@@ -41,6 +41,9 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
 FastDBStatus fdb_disk_close(FDBDisk *disk);
 bool fdb_disk_poisoned(const FDBDisk *disk);
 bool fdb_disk_has_tables(const FDBDisk *disk);
+size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk);
+size_t fdb_disk_memtable_key_bytes(const FDBDisk *disk, bool frozen);
+void fdb_disk_set_active_key_bytes(FDBDisk *disk, size_t bytes);
 bool fdb_disk_tree_fits(const FDBDisk *disk, size_t keys, size_t key_bytes);
 FastDBStatus fdb_disk_frame_size(const FDBDisk *disk, const FDBRecord *records,
                                  size_t count, size_t *bytes);
@@ -67,7 +70,7 @@ FastDBStatus fdb_disk_find_pinned(const FDBDisk *disk, const FDBDiskRead *view, 
 void fdb_disk_unpin_read(FDBDisk *disk, FDBDiskRead *view);
 FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree);
 FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequence);
-FastDBStatus fdb_disk_rotate_wal(FDBDisk *disk);
+FastDBStatus fdb_disk_freeze_wal(FDBDisk *disk);
 FastDBStatus fdb_disk_flush_reserve(FDBDisk *disk, FDBFlushOutput *output);
 FastDBStatus fdb_disk_flush_build(const FDBDisk *disk, const FDBTree *tree, FDBFlushOutput *output);
 FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushOutput *output);

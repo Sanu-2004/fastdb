@@ -1109,6 +1109,60 @@ The focused cases passed 1/1 each. The full profiles and the host's
 `docker build -t fastdb-native:local .` passed 26/26 each. The TSan profile
 ran four concurrency targets five times each with the V062 workaround.
 
+## P4.1 optional LSM memtable arena (V074)
+
+Starting at `6d16f88`, the test-first GCC Debug build failed on the
+missing `fastdb_options_set_lsm_arena` declaration. The first implementation
+passed focused LSM, allocation-fault, internal tree, and snapshot tests.
+The first full profiles found that enlarging the common database handle
+made an existing 230-byte value fail admission under a 512-byte memory
+limit. The corrected design restored the original fixed handle charge and
+moved persistent allocation policy and key-byte accounting into disk state.
+The 512-byte fixture then passed with its original assertions.
+
+The final LSM cases verify full chunk charges, reuse after overwrites,
+charged-memory admission, retained snapshot reads after arena release and
+reopen with the arena disabled. Injected allocation failures leave both a
+new chunk and a reused chunk's cursor unpublished. The retry fits in the
+same chunk and persists the next revision. The worker cases charge active
+and frozen chunks together, validate a snapshot through an ENOSPC flush
+retry, and recover both trees' WAL records after a SIGKILL during output.
+The fixed-cap compaction fixture also passed with 300,067 input bytes and
+253,521 charged bytes observed after foreground writes under its
+262,144-byte cap.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p41-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p41-red --target fastdb_lsm fastdb_alloc_failure --parallel 6
+CC=gcc cmake -S /repo -B /tmp/p41-compat -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p41-compat --parallel 6
+ctest --test-dir /tmp/p41-compat -R '^fastdb_memory$' --output-on-failure
+ctest --test-dir /tmp/p41-compat -R '^fastdb_lsm$' --output-on-failure
+ctest --test-dir /tmp/p41-compat -R '^fastdb_alloc_failure$' --output-on-failure
+ctest --test-dir /tmp/p41-compat -R '^fastdb_background_flush$' --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p41-final-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p41-final-gcc --parallel 6
+ctest --test-dir /tmp/p41-final-gcc -R '^fastdb_read_view$' -V
+ctest --test-dir /tmp/p41-final-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p41-final-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p41-final-clang --parallel 6
+ctest --test-dir /tmp/p41-final-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p41-final-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p41-final-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p41-final-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p41-final-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p41-final-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p41-final-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The corrected focused cases passed 1/1 each. GCC Debug, Clang Release,
+ASan/UBSan with leak detection, and `docker build -t fastdb-native:local .`
+passed 26/26 each. The V062 TSan workaround ran four concurrency targets
+five times each. Arena throughput and release-scale memory remain for
+benchmark runs.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

@@ -114,6 +114,16 @@ worker and joins it before releasing storage. In-flight work finishes or
 reports its error. Active records can remain recoverable in the WAL on clean
 close.
 
+The optional LSM arena reserves space for a staged commit under the same
+writer mutex. The reservation can reuse capacity at the end of the current
+chunk or allocate a new detached chunk. The WAL append precedes moving the
+chunk cursor and linking any new node. A failed commit leaves the cursor
+and published tree unchanged and frees any detached chunk. Freezing
+transfers ownership of all active chunks with the old tree. The worker
+reads the immutable tree until it reacquires the mutex to publish the
+SSTable. A failed publication keeps the frozen chunks for retry. Snapshot
+memtable copies have independent storage.
+
 When the optional flush worker publishes an L0 table, it queues one automatic
 compaction on the same per-database worker. The worker tracks flush and
 compaction errors separately: a failed compaction does not mark a successfully

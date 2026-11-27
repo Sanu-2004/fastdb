@@ -36,6 +36,11 @@ typedef struct StagedWrite {
     FDBNode *node;
 } StagedWrite;
 
+typedef struct StagedTree {
+    FDBArenaWrite arena;
+    size_t key_bytes;
+} StagedTree;
+
 typedef struct Eviction {
     FastDBEvictionPolicy policy;
     size_t limit;
@@ -63,7 +68,7 @@ static Eviction *eviction_state(FastDB *db)
 static size_t live_tree_bytes(const FastDB *db)
 {
     size_t metadata = eviction_enabled(db) ? db->tree.count * sizeof(EvictionRecord) : 0;
-    return db->tree.bytes + metadata;
+    return fdb_tree_memory_bytes(&db->tree) + metadata;
 }
 
 static bool valid_eviction(const FastDBOptions *options)
@@ -196,6 +201,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->mode = mode;
         options->storage = (FastDBPersistentOptions){0};
         options->flush_threshold = 0;
+        options->arena_chunk_bytes = 0;
         fastdb_compaction_options_default(&options->compaction);
         return FASTDB_OK;
     }
@@ -207,6 +213,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     if (mode != options->mode) {
         fastdb_compaction_options_default(&next.compaction);
         next.flush_threshold = 0;
+        next.arena_chunk_bytes = 0;
     }
     if (settings == NULL)
         fastdb_persistent_options_default(&next.storage);
@@ -224,6 +231,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->storage = next.storage;
     options->compaction = next.compaction;
     options->flush_threshold = next.flush_threshold;
+    options->arena_chunk_bytes = next.arena_chunk_bytes;
     return FASTDB_OK;
 }
 
@@ -252,9 +260,21 @@ FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options, size
     return status;
 }
 
+FastDBStatus fastdb_options_set_lsm_arena(FastDBOptions *options, size_t chunk_bytes)
+{
+    if (options == NULL || options->mode != FASTDB_MODE_LSM)
+        return FASTDB_INVALID_ARGUMENT;
+    FastDBOptions candidate = *options;
+    candidate.arena_chunk_bytes = chunk_bytes;
+    FastDBStatus status = fdb_disk_validate(&candidate);
+    if (status == FASTDB_OK)
+        options->arena_chunk_bytes = chunk_bytes;
+    return status;
+}
+
 static FastDBStatus flush_immutable(FastDB *db)
 {
-    FastDBStatus status = fdb_disk_rotate_wal(db->disk);
+    FastDBStatus status = fdb_disk_freeze_wal(db->disk);
     if (status != FASTDB_OK)
         return status;
     FDBBackgroundFlush *flush = db->flush;
@@ -289,7 +309,8 @@ static void *flush_worker(void *arg)
             pthread_cond_broadcast(&flush->condition);
             continue;
         }
-        if (flush->error != FASTDB_OK || flush->waiters != 0 || db->tree.bytes < flush->threshold ||
+        if (flush->error != FASTDB_OK || flush->waiters != 0 ||
+            fdb_tree_memory_bytes(&db->tree) < flush->threshold ||
             fdb_disk_maintenance_waiting(db->disk)) {
             pthread_cond_wait(&flush->condition, &db->mutex);
             continue;
@@ -417,7 +438,7 @@ FastDBStatus fastdb_close(FastDB *db)
 
 size_t fdb_memory_bytes(const FastDB *db)
 {
-    size_t frozen_bytes = db->flush == NULL ? 0 : db->flush->frozen.bytes;
+    size_t frozen_bytes = db->flush == NULL ? 0 : fdb_tree_memory_bytes(&db->flush->frozen);
     return sizeof(*db) + live_tree_bytes(db) + frozen_bytes + db->iterator_bytes + db->snapshot_bytes +
            fdb_disk_pinned_bytes(db->disk) + fdb_disk_compaction_bytes(db->disk);
 }
@@ -716,13 +737,17 @@ static void enforce_live_capacity(FastDB *db, const Eviction *cache)
     }
 }
 
-static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique, size_t spare)
+static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique, size_t spare,
+                                   StagedTree *tree)
 {
     size_t keys = db->tree.count;
-    size_t key_bytes = db->tree.key_bytes;
+    size_t key_bytes = fdb_disk_memtable_key_bytes(db->disk, false);
     bool keep_tombstones = fdb_disk_has_tables(db->disk);
     const Eviction *cache = eviction_state(db);
     size_t write_set_budget = cache == NULL ? 0 : cache->limit;
+    size_t arena_chunk_bytes = fdb_disk_arena_chunk_bytes(db->disk);
+    bool use_arena = arena_chunk_bytes != 0;
+    size_t arena_payload = 0;
     for (size_t i = 0; i < unique; ++i) {
         StagedWrite *write = &stages[i];
         const FDBRecord *record = &write->record;
@@ -748,22 +773,35 @@ static FastDBStatus prepare_nodes(FastDB *db, StagedWrite *stages, size_t unique
                 return FASTDB_LIMIT_EXCEEDED;
             write_set_budget -= write->bytes;
         }
-        if (write->bytes > spare)
-            return FASTDB_LIMIT_EXCEEDED;
-        spare -= write->bytes;
+        if (use_arena) {
+            if (!fdb_arena_count_node(write->bytes, &arena_payload))
+                return FASTDB_LIMIT_EXCEEDED;
+        } else {
+            if (write->bytes > spare)
+                return FASTDB_LIMIT_EXCEEDED;
+            spare -= write->bytes;
+        }
     }
+    tree->key_bytes = key_bytes;
     /* Before the frozen table is durable, recovery replays both trees into one. */
     if (db->flush != NULL &&
         (!fdb_add_size(keys, db->flush->frozen.count, &keys) ||
-         !fdb_add_size(key_bytes, db->flush->frozen.key_bytes, &key_bytes)))
+         !fdb_add_size(key_bytes, fdb_disk_memtable_key_bytes(db->disk, true), &key_bytes)))
         return FASTDB_LIMIT_EXCEEDED;
     if (!fdb_disk_tree_fits(db->disk, keys, key_bytes))
         return FASTDB_LIMIT_EXCEEDED;
+    if (use_arena) {
+        FastDBStatus status = fdb_tree_reserve_arena(&db->tree, arena_payload, arena_chunk_bytes,
+                                                     spare, &tree->arena);
+        if (status != FASTDB_OK)
+            return status;
+    }
 
     for (size_t i = 0; i < unique; ++i) {
         StagedWrite *write = &stages[i];
         if (write->bytes != 0) {
-            write->node = fdb_node_create(&write->record, write->bytes);
+            write->node = use_arena ? fdb_arena_make_node(&tree->arena, &write->record, write->bytes) :
+                                     fdb_node_create(&write->record, write->bytes);
             if (write->node == NULL)
                 return FASTDB_OUT_OF_MEMORY;
         }
@@ -780,7 +818,8 @@ static FastDBStatus publish_stages(FastDB *db, StagedWrite *stages, size_t count
         if (i + 1 == count || fdb_compare(stages[i].record.key, stages[i + 1].record.key) != 0)
             stages[unique++] = stages[i];
     }
-    FastDBStatus status = prepare_nodes(db, stages, unique, spare);
+    StagedTree tree = {0};
+    FastDBStatus status = prepare_nodes(db, stages, unique, spare, &tree);
     if (status == FASTDB_OK && journal != NULL) {
         status = fdb_disk_maybe_checkpoint(db->disk, &db->tree, frame_bytes);
         if (status == FASTDB_OK)
@@ -790,10 +829,14 @@ static FastDBStatus publish_stages(FastDB *db, StagedWrite *stages, size_t count
     uint64_t touch = 0;
     if (status == FASTDB_OK && cache != NULL && cache->policy == FASTDB_EVICTION_LRU)
         touch = next_touch(cache);
+    bool staged_in_arena = tree.arena.chunk != NULL;
+    if (staged_in_arena)
+        fdb_tree_finish_arena(&db->tree, tree.arena, status == FASTDB_OK);
     for (size_t i = 0; i < unique; ++i) {
         StagedWrite *write = &stages[i];
         if (status != FASTDB_OK) {
-            free(write->node);
+            if (!staged_in_arena)
+                free(write->node);
         } else if (write->node != NULL) {
             if (cache != NULL) {
                 const FDBNode *old = fdb_tree_get(&db->tree, write->record.key);
@@ -810,6 +853,7 @@ static FastDBStatus publish_stages(FastDB *db, StagedWrite *stages, size_t count
     if (status == FASTDB_OK) {
         if (cache != NULL)
             enforce_live_capacity(db, cache);
+        fdb_disk_set_active_key_bytes(db->disk, tree.key_bytes);
         db->sequence = sequence;
     }
     return status;
@@ -950,7 +994,7 @@ static FastDBStatus commit(FastDB *db, const Operation *op)
     FastDBStatus status = preflight(db, op, &mutations);
     if (status == FASTDB_OK && mutations != 0) {
         FDBBackgroundFlush *flush = db->flush;
-        if (flush != NULL && db->tree.bytes >= flush->threshold &&
+        if (flush != NULL && fdb_tree_memory_bytes(&db->tree) >= flush->threshold &&
             (flush->frozen.count != 0 || flush->error != FASTDB_OK ||
              fdb_disk_maintenance_waiting(db->disk)))
             status = flush->error == FASTDB_OK ? FASTDB_BUSY : flush->error;

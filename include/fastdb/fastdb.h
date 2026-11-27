@@ -142,6 +142,8 @@ FASTDB_API FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
 /* LSM only. A nonzero active-tree byte threshold enables one background flush worker. */
 FASTDB_API FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options,
                                                                size_t memtable_bytes);
+/* LSM only. Zero uses individual node allocation; otherwise sets the arena chunk payload. */
+FASTDB_API FastDBStatus fastdb_options_set_lsm_arena(FastDBOptions *options, size_t chunk_bytes);
 FASTDB_API FastDBStatus fastdb_open(const FastDBOptions *options, FastDB **out);
 /* Quiesce operations before close. BUSY leaves the handle open. Other results consume it. */
 FASTDB_API FastDBStatus fastdb_close(FastDB *db);

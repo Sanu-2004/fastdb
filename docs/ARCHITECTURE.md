@@ -35,6 +35,9 @@ node metadata and copied pages. The budget also covers batch commit workspace
 and staged nodes while allocating them. The process RSS, allocator overhead,
 thread stacks, caller-owned GET results, and caller-owned options and batches
 are outside the engine budget. Batches have their own per-handle limits.
+LSM can allocate memtable nodes in chunks owned by the active or frozen
+tree. The budget charges each full chunk until its tree is released. A
+snapshot still copies only live nodes and its catalog bounds.
 Persistent handles reserve workspace for bounded table and catalog
 operations. `FastDBStats.memory_bytes` includes this reservation.
 An unlocked LSM read charges copied candidate-table bounds and an extra

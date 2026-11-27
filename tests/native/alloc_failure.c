@@ -1,4 +1,4 @@
-#include "check.h"
+#include "disk_fixture.h"
 
 static size_t fail_after = SIZE_MAX;
 
@@ -73,9 +73,48 @@ static void eviction_rollback(void)
     fastdb_options_destroy(options);
 }
 
+static void arena_rollback(void)
+{
+    char path[] = "/tmp/fastdb-arena-rollback.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    OK(fastdb_options_set_lsm_arena(options, 192));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    FastDBStats before, after;
+    OK(fastdb_stats(db, &before));
+    for (size_t index = 0; index < 2; ++index) {
+        fail_after = index; /* Arena chunk, then WAL frame. */
+        STATUS(fastdb_put(db, "k", 1, "v", 1), FASTDB_OUT_OF_MEMORY);
+        CHECK(fail_after == SIZE_MAX);
+        OK(fastdb_stats(db, &after));
+        CHECK(after.revision == 0 && after.memory_bytes == before.memory_bytes);
+        expect_missing(db, (FastDBSlice){"k", 1});
+    }
+    OK(fastdb_put(db, "k", 1, "v", 1));
+    OK(fastdb_stats(db, &before));
+    /* Reuses the current chunk. Only WAL-frame allocation can fail. */
+    fail_after = 0;
+    STATUS(fastdb_put(db, "k", 1, "x", 1), FASTDB_OUT_OF_MEMORY);
+    CHECK(fail_after == SIZE_MAX);
+    OK(fastdb_stats(db, &after));
+    CHECK(after.revision == 1 && after.memory_bytes == before.memory_bytes);
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){"v", 1}, 1);
+    OK(fastdb_put(db, "k", 1, "x", 1));
+    OK(fastdb_stats(db, &after));
+    CHECK(after.revision == 2 && after.memory_bytes == before.memory_bytes);
+    OK(fastdb_close(db));
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){"x", 1}, 2);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     eviction_rollback();
+    arena_rollback();
     FastDB *db;
     fail_after = 0;
     STATUS(fastdb_open(NULL, &db), FASTDB_OUT_OF_MEMORY);

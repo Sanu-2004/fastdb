@@ -24,3 +24,20 @@ The legacy prototype remains in the source tree for reference and its
 reproduction harness builds the original revision independently. Native
 memory-mode operations make no filesystem calls. Persistent modes need their own
 format, directory lock and verified publication protocol.
+
+## Optional LSM arena
+
+LSM can pack all final mutations in one staged commit into the remaining
+tail of its active tree's arena or into one new chunk. This reduces node
+allocations when the chunk has space for multiple commits. The engine
+advances the cursor and adopts a new chunk at the same publication point
+as the mutations. Recovery uses the same reservation rule for each frame.
+The persistent storage state holds key-byte totals for table admission.
+It transfers those totals at freeze and clears them with the published
+memtables. This keeps the same fixed handle charge in memory-only mode.
+
+Overwrites retain their arena space until the entire memtable is freed.
+Limits and the worker threshold account for full chunk costs. Both RAM
+modes use individually allocated nodes so replacing or deleting a record
+still releases its allocation. Snapshots copy current records into their
+own trees and require no arena lifetime extension.

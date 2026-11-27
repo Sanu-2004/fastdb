@@ -9,6 +9,9 @@
 
 struct FDBDisk {
     size_t compaction_bytes;
+    size_t arena_chunk_bytes;
+    size_t active_key_bytes;
+    size_t frozen_key_bytes;
     FDBDirectory dir;
     FDBWalSet log;
     FDBSSTLimits table;
@@ -118,6 +121,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
         options->mode == FASTDB_MODE_LSM ? disk->policy.levels : 7,
     };
     disk->mode = options->mode;
+    disk->arena_chunk_bytes = options->arena_chunk_bytes;
     disk->durability = storage->durability;
     disk->min_free_bytes = storage->min_free_bytes;
     disk->max_open_files = storage->max_open_files;
@@ -149,8 +153,20 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     size_t smallest_node;
     size_t available = limits->max_memory_bytes - sizeof(FastDB);
     if (!fdb_node_size((FastDBSlice){.size = 1}, (FastDBSlice){0}, &smallest_node) ||
-        *workspace > available || options->flush_threshold > available - *workspace ||
-        smallest_node + FDB_WAL_FRAME_BYTES + FDB_RECORD_HEADER_BYTES + 1 > available - *workspace)
+        *workspace > available || options->flush_threshold > available - *workspace)
+        return FASTDB_INVALID_ARGUMENT;
+    if (options->arena_chunk_bytes != 0) {
+        size_t payload = 0;
+        if (options->mode != FASTDB_MODE_LSM || !fdb_arena_count_node(smallest_node, &payload))
+            return FASTDB_INVALID_ARGUMENT;
+        if (payload < options->arena_chunk_bytes)
+            payload = options->arena_chunk_bytes;
+        if (!fdb_arena_chunk_size(payload, &smallest_node))
+            return FASTDB_INVALID_ARGUMENT;
+    }
+    const size_t minimum_frame = FDB_WAL_FRAME_BYTES + FDB_RECORD_HEADER_BYTES + 1;
+    if (available - *workspace < minimum_frame ||
+        smallest_node > available - *workspace - minimum_frame)
         return FASTDB_INVALID_ARGUMENT;
     return FASTDB_OK;
 }
@@ -279,6 +295,24 @@ bool fdb_disk_poisoned(const FDBDisk *disk)
 bool fdb_disk_has_tables(const FDBDisk *disk)
 {
     return disk != NULL && disk->mode == FASTDB_MODE_LSM;
+}
+
+size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk)
+{
+    return disk == NULL ? 0 : disk->arena_chunk_bytes;
+}
+
+size_t fdb_disk_memtable_key_bytes(const FDBDisk *disk, bool frozen)
+{
+    if (disk == NULL)
+        return 0;
+    return frozen ? disk->frozen_key_bytes : disk->active_key_bytes;
+}
+
+void fdb_disk_set_active_key_bytes(FDBDisk *disk, size_t bytes)
+{
+    if (disk != NULL)
+        disk->active_key_bytes = bytes;
 }
 
 bool fdb_disk_tree_fits(const FDBDisk *disk, size_t keys, size_t key_bytes)
@@ -651,6 +685,8 @@ FastDBStatus fdb_disk_flush(FDBDisk *disk, FDBTree *tree)
         status = fdb_storage_prepare_maintenance(&disk->log);
     if (status == FASTDB_OK)
         status = fdb_flush_l0(&disk->log, tree, disk->log.wal.sequence, &disk->table);
+    if (tree->count == 0)
+        disk->active_key_bytes = 0;
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
@@ -671,13 +707,21 @@ FastDBStatus fdb_disk_retry_frozen(FDBDisk *disk, FDBTree *tree, uint64_t sequen
     FastDBStatus status = fdb_storage_reclaim_orphans(&disk->log);
     if (status == FASTDB_OK)
         status = fdb_flush_l0(&disk->log, tree, sequence, &disk->table);
+    if (tree->count == 0)
+        disk->frozen_key_bytes = 0;
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
-FastDBStatus fdb_disk_rotate_wal(FDBDisk *disk)
+FastDBStatus fdb_disk_freeze_wal(FDBDisk *disk)
 {
     FastDBStatus status = fdb_storage_prepare_maintenance(&disk->log);
-    return status == FASTDB_OK ? fdb_wal_set_rotate(&disk->log) : status;
+    if (status == FASTDB_OK)
+        status = fdb_wal_set_rotate(&disk->log);
+    if (status == FASTDB_OK) {
+        disk->frozen_key_bytes = disk->active_key_bytes;
+        disk->active_key_bytes = 0;
+    }
+    return status;
 }
 
 FastDBStatus fdb_disk_flush_reserve(FDBDisk *disk, FDBFlushOutput *output)
@@ -693,6 +737,8 @@ FastDBStatus fdb_disk_flush_build(const FDBDisk *disk, const FDBTree *tree, FDBF
 FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushOutput *output)
 {
     FastDBStatus status = fdb_flush_commit(&disk->log, tree, output);
+    if (tree->count == 0)
+        disk->frozen_key_bytes = 0;
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
