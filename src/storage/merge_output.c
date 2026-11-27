@@ -56,6 +56,11 @@ static bool starts_new_key(const FDBSSTWriter *writer, FastDBSlice key)
 static FastDBStatus emit(void *context, const FDBRecord *record)
 {
     OutputTables *tables = context;
+    /* Merge order is newest first. The writer keeps each key group together. */
+    if (tables->limits->discard_shadowed_puts && record->kind == FDB_PUT &&
+        tables->writer != NULL &&
+        fdb_compare(fdb_sst_writer_last_key(tables->writer), record->key) == 0)
+        return FASTDB_OK;
     FastDBStatus status = FASTDB_OK;
     FastDBSlice boundary = tables->limits->split_after;
     bool suffix = boundary.size != 0 && fdb_compare(record->key, boundary) > 0;

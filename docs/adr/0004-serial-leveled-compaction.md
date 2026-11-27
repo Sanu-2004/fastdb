@@ -29,8 +29,8 @@ the job's output capacity while retaining the same input references.
 Streaming consumes IDs from that range without editing the catalog. Unused
 IDs remain consumed. Failed jobs
 leave the inputs authoritative until the committed replacement can be
-confirmed. Sequence high-water, distinct versions, tombstones and expiry
-metadata are preserved. Manual compaction stops after all selected ranges
+confirmed. The sequence high-water, tombstones, and expiry metadata of
+retained records are preserved. Manual compaction stops after all selected ranges
 reach the last level. The planner may return a resource-limit error when
 history for one key exceeds one output's metadata capacity.
 
@@ -39,3 +39,20 @@ It bounds input and output counts and opens one output at a time. A
 compaction can require additional disk space until it commits and reclaims
 the inputs. Disk headroom admission and background admission are later
 milestones.
+
+## Reclaim shadowed PUTs in a merge
+
+The compaction writer sees each key group in descending revision order.
+When it encounters an older PUT after emitting a newer record for that
+key, it can omit the older PUT. The newer record in the same catalog edit
+masks every lower revision regardless of whether it is a value, tombstone
+or expired value. Unselected files and concurrently written memory entries
+cannot change this ordering. A snapshot or point read captured earlier
+uses the old catalog, whose files stay pinned until release.
+
+The output preserves the highest input sequence because that sequence
+cannot have a newer record in the same input set. This preserves the
+table coverage recovery uses to replay the WAL. The merge still reads and
+checks every input for errors. It keeps all tombstones, including those
+with older revisions, and keeps the latest expired PUT. Removing a
+remaining mask requires a separate overlap and coverage proof.

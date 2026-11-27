@@ -1,6 +1,7 @@
 #include "disk_fixture.h"
 #include "engine.h"
 #include "manifest.h"
+#include "recovery.h"
 #include "sstable_format.h"
 
 static uint64_t check_levels(const char *path, const size_t *counts, uint32_t levels)
@@ -23,6 +24,90 @@ static uint64_t check_levels(const char *path, const size_t *counts, uint32_t le
     fdb_manifest_release(&catalog);
     OK(fdb_dir_close(&directory));
     return generation;
+}
+
+static void check_reclaimed_table(const char *path, const FastDBOptions *options)
+{
+    FDBDirectory directory;
+    OK(fdb_dir_lock(path, NULL, &directory));
+    const FDBManifestLimits manifest_limits = {16, 2048, 32, 2};
+    FDBManifestLoad catalog;
+    OK(fdb_manifest_load(&directory, &manifest_limits, &catalog));
+    const FastDBPersistentOptions *storage = &options->storage;
+    const FDBSSTLimits limits = {
+        .max_key_bytes = options->limits.max_key_bytes,
+        .max_value_bytes = options->limits.max_value_bytes,
+        .target_block_bytes = storage->target_block_bytes,
+        .max_block_bytes = FDB_RECORD_HEADER_BYTES + SST_BLOCK_HEADER_BYTES + SST_OFFSET_BYTES +
+                           options->limits.max_key_bytes + options->limits.max_value_bytes,
+        .max_index_bytes = storage->max_index_bytes,
+        .max_filter_bytes = storage->max_filter_bytes,
+        .bloom_bits_per_key = storage->bloom_bits_per_key,
+    };
+    size_t tables = 0;
+    for (size_t i = 0; i < catalog.view.count; ++i) {
+        const FDBManifestEntry *entry = &catalog.view.entries[i];
+        if (entry->kind != FDB_FILE_SSTABLE)
+            continue;
+        ++tables;
+        FDBSSTReader *reader;
+        CHECK(entry->level == 1);
+        OK(fdb_catalog_open_table(&directory, entry, &limits, &reader));
+        const FDBSSTProperties *properties = fdb_sst_reader_properties(reader);
+        CHECK(properties->records == 3 && properties->tombstones == 1);
+        CHECK(properties->max_sequence == 5);
+        OK(fdb_sst_reader_close(reader));
+    }
+    CHECK(tables == 1);
+    fdb_manifest_release(&catalog);
+    OK(fdb_dir_close(&directory));
+}
+
+static void reclaim_shadowed_versions(void)
+{
+    char path[] = "/tmp/fastdb-reclaim-versions.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_put(db, "m", 1, "old", 3));
+    OK(fastdb_put(db, "z", 1, "guard", 5));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    OK(fastdb_put(db, "a", 1, "new", 3));
+    OK(fastdb_delete(db, "m", 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"new", 3}, 4);
+    expect_missing(db, (FastDBSlice){"m", 1});
+    void *value;
+    size_t size;
+    uint64_t revision;
+    OK(fastdb_snapshot_get(snapshot, "m", 1, &value, &size, &revision));
+    CHECK(size == 3 && memcmp(value, "old", 3) == 0 && revision == 2);
+    fastdb_free(value);
+    OK(fastdb_snapshot_get(snapshot, "a", 1, &value, &size, &revision));
+    CHECK(size == 3 && memcmp(value, "old", 3) == 0 && revision == 1);
+    fastdb_free(value);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_close(db));
+    check_reclaimed_table(path, options);
+
+    OK(fastdb_open(options, &db));
+    expect_missing(db, (FastDBSlice){"m", 1});
+    expect_value(db, (FastDBSlice){"z", 1}, (FastDBSlice){"guard", 5}, 3);
+    OK(fastdb_put(db, "m", 1, "reinserted", 10));
+    expect_value(db, (FastDBSlice){"m", 1}, (FastDBSlice){"reinserted", 10}, 6);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
 }
 
 static void staged_and_reopen(void)
@@ -247,6 +332,7 @@ static void reserve_split_outputs_in_one_edit(void)
 
 int main(void)
 {
+    reclaim_shadowed_versions();
     workspace_limits_fan_in();
     staged_and_reopen();
     auto_cascade_and_disable();

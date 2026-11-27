@@ -18,6 +18,7 @@ typedef struct FDBMergeLimits {
     size_t max_working_bytes;
     uint64_t target_output_bytes;
     FastDBSlice split_after;
+    bool discard_shadowed_puts;
 } FDBMergeLimits;
 
 typedef struct FDBMergeOutput {

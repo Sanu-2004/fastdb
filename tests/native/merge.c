@@ -108,7 +108,9 @@ static void split_merge(const FDBDirectory *dir, const FDBSSTReader *const *inpu
 {
     size_t output_budget;
     CHECK(fdb_sst_writer_budget(&limits, &output_budget));
-    FDBMergeLimits options = {limits, 3, 3, budget + output_budget, 200, {0}};
+    FDBMergeLimits options = {.output_table = limits, .max_inputs = 3, .max_outputs = 3,
+                               .max_working_bytes = budget + output_budget,
+                               .target_output_bytes = 200};
     Split state = {.next = 10, .expected_key = {'a', 'b', 'c'}};
     const FDBMergeOutput output = {reserve_file, finished_file, &state};
     --options.max_inputs;

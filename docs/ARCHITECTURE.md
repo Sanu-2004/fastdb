@@ -44,9 +44,11 @@ entries and tombstones in both trees. An overwritten key can appear in both
 counts until publication removes the frozen copy.
 
 The internal merge streams sorted SSTables through one block buffer per
-reader and a min-heap of current records. It retains distinct revisions,
-tombstones, and expiration timestamps. Identical copies of a revision for
-the same key are deduplicated. Conflicting copies fail the merge. File
+reader and a min-heap of current records. Identical copies of a revision for
+the same key are deduplicated. Conflicting copies fail the merge. Compaction
+omits older PUTs shadowed by a newer record in the same merge. It preserves
+the newest revision of each key, every tombstone, and expiration metadata on
+retained records. Snapshot pins keep the original tables available. File
 targets are soft at key boundaries, so one key's versions are never split
 across two outputs. The writer's hard metadata limits can reject an
 oversized group. The splitter writes synced temporary files and leaves

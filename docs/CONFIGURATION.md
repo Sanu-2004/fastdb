@@ -208,9 +208,11 @@ optional flush worker is enabled, it schedules at most one automatic
 compaction after L0 publication. With sufficient headroom, that worker
 compaction streams outside the database mutex and allows a foreground L0
 flush; otherwise it uses the serialized path. A flush can report a compaction
-error after its L0 table is durable. Size-tiered compaction and history
-garbage collection are pending.
+error after its L0 table is durable. Compaction reclaims PUTs shadowed by
+newer records in the same merge. Tombstones and the newest record for each
+merged key remain in the output. Size-tiered compaction and reclamation of
+the remaining masks are pending.
 
-The engine uses no automatic eviction. Workspace charges describe
+Eviction is disabled by default. Workspace charges describe
 engine-requested allocations and reserved capacity. See
 [architecture](ARCHITECTURE.md) for the accounting boundary.

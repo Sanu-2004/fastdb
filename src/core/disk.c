@@ -762,6 +762,7 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         .max_inputs = policy.max_inputs,
         .max_outputs = disk->manifest.max_files,
         .target_output_bytes = disk->compaction.target_file_bytes,
+        .discard_shadowed_puts = true,
     };
     FastDBStatus status;
     for (;;) {

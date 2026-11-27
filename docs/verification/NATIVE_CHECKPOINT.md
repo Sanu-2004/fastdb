@@ -965,6 +965,49 @@ cmake --build /tmp/p39-eviction-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p39-eviction-tsan -L concurrency --repeat until-fail:5 --output-on-failure
 ```
 
+## First P3.10 checkpoint with shadowed PUT collection (V071)
+
+The new regression held a pre-update snapshot through compaction, checked
+the live tombstone, released the snapshot, and inspected the finished
+table. The original engine failed the assertion for three output records.
+The revised output contains the newest PUT, the unaffected key and the
+tombstone. It retains the highest input sequence of 5. Reopen still
+masks the deleted key and reinsertion receives revision 6.
+
+The first implementation build required a designated initializer for the
+new internal merge option. The existing merge fixture still checks its
+original history-retaining behavior. These commands ran in the V064
+toolchain container with the source mounted read-only.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p310-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p310-red --target fastdb_compaction --parallel
+ctest --test-dir /tmp/p310-red -R '^fastdb_compaction$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p310-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p310-gcc --parallel
+ctest --test-dir /tmp/p310-gcc -R '^fastdb_compaction$' --output-on-failure
+ctest --test-dir /tmp/p310-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p310-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p310-clang --parallel
+ctest --test-dir /tmp/p310-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p310-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p310-asan --parallel
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p310-asan --output-on-failure
+```
+
+The final focus test passed 1/1. Each full profile passed 26/26, as did
+the Release tests in `docker build -t fastdb-native:local .`. GCC TSan using
+the V062 Docker workaround passed four concurrency suites five times each.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p310-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p310-tsan --parallel
+setarch x86_64 -R ctest --test-dir /tmp/p310-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new
