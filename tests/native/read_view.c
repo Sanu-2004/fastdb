@@ -258,10 +258,62 @@ static void writes_during_compaction(void)
     remove_disk_fixture(path);
 }
 
+static void snapshot_during_mask_reclamation(void)
+{
+    char path[] = "/tmp/fastdb-mask-read.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
+    ReadGate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
+                     .foreground = pthread_self(), .writes_until_pause = 2};
+    const FDBFs fs = {hold_open, &gate};
+    FastDB *db;
+    OK(fdb_open_with_fs(options, &fs, &db));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    OK(fastdb_delete(db, "a", 1));
+    OK(fastdb_put(db, "z", 1, "guard", 5));
+    OK(fastdb_flush(db));
+    char old_names[2][25];
+    collect_tables(path, old_names);
+
+    pthread_t compactor;
+    CHECK(pthread_create(&compactor, NULL, compact_db, db) == 0);
+    wait_read(&gate);
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    CHECK(fastdb_snapshot_revision(snapshot) == 3);
+    OK(fastdb_put(db, "a", 1, "fresh", 5));
+    finish_read(&gate, compactor);
+
+    check_old_files(path, old_names, true);
+    void *value;
+    size_t size;
+    uint64_t revision;
+    STATUS(fastdb_snapshot_get(snapshot, "a", 1, &value, &size, &revision), FASTDB_NOT_FOUND);
+    CHECK(value == NULL && size == 0 && revision == 0);
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"fresh", 5}, 4);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_close(db));
+    check_old_files(path, old_names, false);
+    destroy_gate(&gate);
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"fresh", 5}, 4);
+    expect_value(db, (FastDBSlice){"z", 1}, (FastDBSlice){"guard", 5}, 3);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     across_compaction(false);
     across_compaction(true);
     across_background_flush();
     writes_during_compaction();
+    snapshot_during_mask_reclamation();
 }

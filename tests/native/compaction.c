@@ -26,7 +26,8 @@ static uint64_t check_levels(const char *path, const size_t *counts, uint32_t le
     return generation;
 }
 
-static void check_reclaimed_table(const char *path, const FastDBOptions *options)
+static void check_single_table(const char *path, const FastDBOptions *options, uint32_t level,
+                               uint64_t records, uint64_t tombstones, uint64_t max_sequence)
 {
     FDBDirectory directory;
     OK(fdb_dir_lock(path, NULL, &directory));
@@ -47,15 +48,14 @@ static void check_reclaimed_table(const char *path, const FastDBOptions *options
     size_t tables = 0;
     for (size_t i = 0; i < catalog.view.count; ++i) {
         const FDBManifestEntry *entry = &catalog.view.entries[i];
-        if (entry->kind != FDB_FILE_SSTABLE)
+        if (entry->kind != FDB_FILE_SSTABLE || entry->level != level)
             continue;
         ++tables;
         FDBSSTReader *reader;
-        CHECK(entry->level == 1);
         OK(fdb_catalog_open_table(&directory, entry, &limits, &reader));
         const FDBSSTProperties *properties = fdb_sst_reader_properties(reader);
-        CHECK(properties->records == 3 && properties->tombstones == 1);
-        CHECK(properties->max_sequence == 5);
+        CHECK(properties->records == records && properties->tombstones == tombstones);
+        CHECK(properties->max_sequence == max_sequence);
         OK(fdb_sst_reader_close(reader));
     }
     CHECK(tables == 1);
@@ -98,7 +98,8 @@ static void reclaim_shadowed_versions(void)
     fastdb_free(value);
     fastdb_snapshot_release(snapshot);
     OK(fastdb_close(db));
-    check_reclaimed_table(path, options);
+    check_levels(path, (size_t[]){0, 1}, 2);
+    check_single_table(path, options, 1, 3, 1, 5);
 
     OK(fastdb_open(options, &db));
     expect_missing(db, (FastDBSlice){"m", 1});
@@ -106,6 +107,108 @@ static void reclaim_shadowed_versions(void)
     OK(fastdb_put(db, "m", 1, "reinserted", 10));
     expect_value(db, (FastDBSlice){"m", 1}, (FastDBSlice){"reinserted", 10}, 6);
     OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static FastDBOptions *bottommost_options(const char *path)
+{
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    OK(fastdb_options_set_compaction(options, &policy));
+    return options;
+}
+
+static void reclaim_tombstones_except_coverage(void)
+{
+    char path[] = "/tmp/fastdb-reclaim-tombstones.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    for (char key = 'a'; key <= 'c'; ++key)
+        OK(fastdb_put(db, &key, 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    for (char key = 'a'; key <= 'c'; ++key)
+        OK(fastdb_delete(db, &key, 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    for (char key = 'a'; key <= 'c'; ++key)
+        expect_missing(db, (FastDBSlice){&key, 1});
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 1}, 2);
+    check_single_table(path, options, 1, 1, 1, 6);
+
+    OK(fastdb_open(options, &db));
+    for (char key = 'a'; key <= 'c'; ++key)
+        expect_missing(db, (FastDBSlice){&key, 1});
+    OK(fastdb_put(db, "a", 1, "new", 3));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){"new", 3}, 7);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void retain_mask_over_unselected_input(void)
+{
+    char path[] = "/tmp/fastdb-mask-unselected.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_delete(db, "a", 1));
+    OK(fastdb_put(db, "z", 1, "guard", 5));
+    OK(fastdb_flush(db));
+    const FastDBRange range = {.start = {"z", 1}};
+    OK(fastdb_compact_range(db, &range));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){1, 1}, 2);
+    check_single_table(path, options, 1, 2, 1, 3);
+
+    OK(fastdb_open(options, &db));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    OK(fastdb_compact(db));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 1}, 2);
+    check_single_table(path, options, 1, 1, 0, 3);
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void retain_mask_during_snapshot(void)
+{
+    char path[] = "/tmp/fastdb-mask-snapshot.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    OK(fastdb_delete(db, "a", 1));
+    OK(fastdb_put(db, "z", 1, "guard", 5));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    void *value;
+    size_t size;
+    uint64_t revision;
+    OK(fastdb_snapshot_get(snapshot, "a", 1, &value, &size, &revision));
+    CHECK(size == 3 && memcmp(value, "old", 3) == 0 && revision == 1);
+    fastdb_free(value);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 1}, 2);
+    check_single_table(path, options, 1, 2, 1, 3);
     fastdb_options_destroy(options);
     remove_disk_fixture(path);
 }
@@ -333,6 +436,9 @@ static void reserve_split_outputs_in_one_edit(void)
 int main(void)
 {
     reclaim_shadowed_versions();
+    retain_mask_over_unselected_input();
+    retain_mask_during_snapshot();
+    reclaim_tombstones_except_coverage();
     workspace_limits_fan_in();
     staged_and_reopen();
     auto_cascade_and_disable();

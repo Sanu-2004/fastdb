@@ -19,6 +19,8 @@ typedef struct FDBMergeLimits {
     uint64_t target_output_bytes;
     FastDBSlice split_after;
     bool discard_shadowed_puts;
+    /* Nonzero permits dropping DELETE-led groups below this retained sequence. */
+    uint64_t gc_anchor;
 } FDBMergeLimits;
 
 typedef struct FDBMergeOutput {

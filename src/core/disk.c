@@ -804,15 +804,27 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         if (status != FASTDB_OK)
             break;
         limits.max_working_bytes = available - selection_bytes;
-        size_t catalogs, charge = disk->writer_bytes + plan.count * input_bytes;
+        size_t merge_bytes = disk->writer_bytes + plan.count * input_bytes;
+        size_t catalogs, charge = merge_bytes;
         pthread_mutex_t *mutex = NULL;
         if ((manual || background) && catalog_budget(&disk->manifest, &catalogs) &&
             fdb_add_size(charge, catalogs / 3, &charge) &&
             fdb_add_size(charge, selection_bytes, &charge) &&
-            fdb_add_size(charge, plan.split_after.size, &charge) && charge <= headroom) {
+            fdb_add_size(charge, plan.split_after.size, &charge) && charge <= headroom)
+            mutex = &db->mutex;
+        limits.gc_anchor = 0;
+        size_t key_bytes = disk->table.max_key_bytes;
+        if (disk->log.snapshot_catalog == NULL &&
+            key_bytes <= limits.max_working_bytes - merge_bytes &&
+            (mutex == NULL || key_bytes <= headroom - charge)) {
+            limits.gc_anchor = fdb_compaction_gc_anchor(&disk->log.catalog.view, &policy,
+                                                         &plan, input_ids);
+        }
+        if (mutex != NULL) {
+            if (limits.gc_anchor != 0)
+                charge += key_bytes;
             disk->compaction_bytes = charge;
             disk->compaction_flush_allowed = background;
-            mutex = &db->mutex;
         }
         status = fdb_compact_once(&disk->log, &policy, &plan, input_ids, &limits, mutex);
         disk->compaction_bytes = 0;

@@ -209,9 +209,14 @@ compaction after L0 publication. With sufficient headroom, that worker
 compaction streams outside the database mutex and allows a foreground L0
 flush; otherwise it uses the serialized path. A flush can report a compaction
 error after its L0 table is durable. Compaction reclaims PUTs shadowed by
-newer records in the same merge. Tombstones and the newest record for each
-merged key remain in the output. Size-tiered compaction and reclamation of
-the remaining masks are pending.
+newer records in the same merge. An unsplit job targeting the last level
+can also reclaim a DELETE and its older versions when every unselected
+table overlapping the job's key range contains only newer sequences. It
+keeps the highest input revision for WAL recovery, keeps the latest PUT
+regardless of TTL, and keeps DELETE masks when a snapshot already pins
+tables or the job lacks workspace for one extra maximum-size key. See
+[ADR 0004](adr/0004-serial-leveled-compaction.md) for the reclamation proof.
+Size-tiered compaction is pending.
 
 Eviction is disabled by default. Workspace charges describe
 engine-requested allocations and reserved capacity. See

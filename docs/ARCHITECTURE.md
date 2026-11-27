@@ -46,9 +46,11 @@ counts until publication removes the frozen copy.
 The internal merge streams sorted SSTables through one block buffer per
 reader and a min-heap of current records. Identical copies of a revision for
 the same key are deduplicated. Conflicting copies fail the merge. Compaction
-omits older PUTs shadowed by a newer record in the same merge. It preserves
-the newest revision of each key, every tombstone, and expiration metadata on
-retained records. Snapshot pins keep the original tables available. File
+omits older PUTs shadowed by a newer record in the same merge. An unsplit
+bottom-level job can also omit a DELETE and its older versions when the
+catalog rules out older overlapping data and the job retains its highest
+input revision. Compaction keeps the latest PUT even after its TTL expires.
+Snapshot pins keep the original tables available. File
 targets are soft at key boundaries, so one key's versions are never split
 across two outputs. The writer's hard metadata limits can reject an
 oversized group. The splitter writes synced temporary files and leaves

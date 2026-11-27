@@ -53,6 +53,27 @@ uses the old catalog, whose files stay pinned until release.
 The output preserves the highest input sequence because that sequence
 cannot have a newer record in the same input set. This preserves the
 table coverage recovery uses to replay the WAL. The merge still reads and
-checks every input for errors. It keeps all tombstones, including those
-with older revisions, and keeps the latest expired PUT. Removing a
-remaining mask requires a separate overlap and coverage proof.
+checks every input for errors.
+
+## Reclaim DELETE-led key groups at the bottom level
+
+An unsplit job writing to the last level may omit a key group when its
+newest record is a DELETE below the highest input sequence. Under the
+database mutex, the planner checks the closed key range spanned by the
+selected inputs against every unselected SSTable at every level. It keeps
+the masks if any overlapping table may contain a record at or below the
+highest input sequence. A table whose minimum sequence is higher cannot
+contain a value that would be resurrected. The frozen and active trees and
+recoverable WAL records cover the sequence suffix after the installed
+SSTables. A detached job rechecks this catalog proof before publication.
+
+The whole key group is skipped, including any older values. At least the
+highest input revision is emitted so that WAL coverage and sequence
+allocation remain intact after reopen. The merge reserves one maximum-key
+buffer to recognize omitted groups. It keeps the masks if the buffer cannot
+fit the job budget. A snapshot already pinning tables prevents the job from
+removing masks. A snapshot or point read captured during a detached merge
+pins the pre-publication catalog before the engine can retire its files.
+Compaction retains the latest PUT even if it has expired, so a subsequent
+UTC clock correction follows the same TTL read rules before and after the
+merge.

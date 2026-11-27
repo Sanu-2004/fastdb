@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-27\
-**Last verified base commit / branch:** `a8a9b4a` / `main`. V070 closed P3.9. V071 verifies the first P3.10 history reclamation checkpoint.
+**Last verified base commit / branch:** `8eeaee2` / `main`. V072 verifies completed P3.10.
 **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.  
-**Next task:** P3.10 — safe LSM history and tombstone collection.
+**Next task:** P3.11 — multilevel compaction integration and bounded working-set verification.
 
 ## 1. How to use this file
 
@@ -103,7 +103,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P3.7 | Backpressure, queue/memory/FD/background budgets, disk headroom and safe error states. | DONE | V054–V060 cover low-space preflight, bounded worker queues, safe shutdown errors and atomic backpressure. V064 verifies active plus frozen memory saturation and compaction workspace admission. V065 measures the persistent memory rotation peak of five FDs. V066 verifies the LSM floor of ten across recovery and a pinned read, two-reader compaction, WAL rotation and foreground flush. GCC Debug, Clang Release, ASan/UBSan with leak detection and Docker Release each passed 23/23. TSan passed 15 executions across three concurrency tests. Bounds are engine-accounted and disk preflight is advisory. Release-scale RSS measurement is tracked in P3.11 and P8.3. |
 | P3.8 | Native snapshots and history retention across memtable and disk; atomic batch visibility; coherent merged scans. | DONE | V067 verifies memory capture and allocation rollback. V068 verifies active/frozen and SSTable snapshot capture, file retention through compaction, coherent live and snapshot range/prefix pages, binary ordering, tombstone masking, and scan error propagation. All full configurations passed 24/24 and TSan passed 20 executions. See [ADR 0008](docs/adr/0008-lsm-snapshots-and-bounded-pages.md). |
 | P3.9 | TTL with controlled clock, expiration masking, physical reclamation and explicitly enabled memory eviction policies. | DONE | V069 verifies TTL in all modes and bounded purge in both memory modes. V070 adds opt-in FIFO, LRU and LFU, charged live capacity and atomic victim removal in memory-only mode. Persistent modes reject eviction. Tests cover policy ordering, snapshot retention, staging headroom, allocation rollback and default admission. Full profiles 26/26 each. TSan passed 20 executions. |
-| P3.10 | Safe obsolete-version/tombstone collection with proof, active snapshot checks and no data resurrection. Depends P3.8/P3.9. | IN_PROGRESS | V071 omits shadowed PUTs in compaction while retaining all tombstones and each key's newest revision. Existing snapshot pins preserve earlier values. Output counts, restart coverage and reinsertion are verified. Removing remaining masks still requires broader overlap and recovery coverage tests. |
+| P3.10 | Safe obsolete-version/tombstone collection with proof, active snapshot checks and no data resurrection. Depends P3.8/P3.9. | DONE | V071 verifies shadowed PUT reclamation. V072 verifies bottom-level DELETE reclamation, retention over unselected older data, snapshot pins before and during a merge, recovery coverage, and reinsertion. See [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
 | P3.11 | Multilevel integration, crash during compaction, concurrent GET/PUT/DELETE, history checks, TSan and bounded-memory merge verification. | TODO | — |
 
 **P3 exit gate:** Concurrent LSM storage works across levels, durable reads remain correct, no resurrection, and large merge memory use is measured and bounded.
@@ -200,12 +200,12 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021 |
 | G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021 |
 | G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021 |
-| G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | NOT RUN | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. Mask reclamation coverage is pending in P3.10. |
+| G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | PASS | V067–V068 cover complete batches, CAS, memory and LSM snapshots, merged scans and concurrent snapshot/maintenance fixtures. Release stress remains in G08/G09. |
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | — |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V071 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V072 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -294,6 +294,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V069 | 2026-11-26 / P3.9 TTL checkpoint based on `f9fbd3e` | Test-first build, focused controlled-clock TTL test, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Exact deadline, commit-time batch TTL, overflow rollback, clock error, snapshots, WAL replay/checkpoint/compaction and partial purge uncertainty tested. First full GCC run had one tight-memory regression. Test-only clock wrapping restored the existing budget. Final focused TTL 1/1, full profiles 25/25 and TSan 20 executions. |
 | V070 | 2026-11-27 / P3.9 completion based on `b97c846` | Test-first GCC build, focused GCC tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | New tests initially failed to link the missing eviction API. The final FIFO/LRU/LFU tests and failed-batch rollback passed. Existing 512-byte default memory budget test passed unchanged. Focused tests 3/3, full profiles 26/26 each and TSan four suites × five repeats. |
 | V071 | 2026-11-27 / P3.10 shadowed PUT collection based on `a8a9b4a` | Test-first compaction regression, focused GCC Debug test, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Original compaction failed the expected output-count assertion. Final output retains three records and one tombstone from five input revisions. The pinned snapshot keeps old values, live reads mask the deleted key, and reopen retains sequence coverage and accepts the next revision. Focused 1/1, full profiles 26/26 each, TSan 20 executions. |
+| V072 | 2026-11-27 / P3.10 DELETE reclamation based on `8eeaee2` | Test-first GCC Debug compaction regression, focused compaction/read-view/crash tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Original compaction retained an eligible DELETE. Revised engine reclaims closed DELETE-led groups and keeps overlap masks, pre-existing snapshot masks, and the highest revision for WAL recovery. A snapshot captured during a detached merge holds the old files through publication. Focused targets passed 1/1 each including 27 crash cases. All full profiles passed 26/26 each. TSan passed 20 executions. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -319,7 +320,7 @@ For stress/fuzz/benchmarks, log seed, operation counts, workload, duration, data
 | D001 | C17 engine; Go/cgo REST/document layer; React/TypeScript Studio | Accepted architecture. C17 memory mode verified; remaining layers follow the milestone dependencies. |
 | D002 | New versioned binary SSTable/WAL/manifest formats; legacy files untouched | Accepted. Segment, manifest, table and Bloom formats verified through public persistence and component tests. Legacy inputs use the separate guarded exporter. |
 | D003 | Three independent storage modes; safe persistent defaults and explicit memory eviction | Three modes verified through public native and CLI entry points. Sync is the persistent default. Interval and group commit remain P4.3. |
-| D004 | Leveled compaction first with sequence-based visibility | V026–V028 verify promotion, overlap closure, publication and recovery. V071 reclaims shadowed PUTs while retaining masks. The reclamation proof is in [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
+| D004 | Leveled compaction first with sequence-based visibility | V026–V028 verify promotion, overlap closure, publication and recovery. V071 reclaims shadowed PUTs. V072 reclaims eligible bottom-level DELETE-led groups. The reclamation proof is in [ADR 0004](docs/adr/0004-serial-leveled-compaction.md). |
 | D005 | Left-leaning red-black tree, one allocation per node, immutable bounded page copies | Accepted in [ADR 0001](docs/adr/0001-native-memory-tree.md). V003–V005. |
 | D006 | Complete atomic MANIFEST snapshots plus durable reservations before file creation | Accepted in [ADR 0002](docs/adr/0002-atomic-manifest.md). V008–V011. |
 | D007 | Native serial storage and persistent-memory checkpoint coverage separate from the newest live revision | Accepted in [ADR 0003](docs/adr/0003-serial-native-persistence.md). V019–V021. |
@@ -574,15 +575,21 @@ These are deliberate boundaries, not completed features:
 - An initial full build encountered a missing-field warning in the internal merge fixture. Converted that initializer to designated fields with its original behavior. V071 focused test passed 1/1, full GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release 26/26 each, and TSan 20 executions.
 - P3.10 remains IN_PROGRESS. Reclamation of masks is the next step.
 
+### Session 026 — 2026-11-27 — Complete P3.10 DELETE reclamation
+
+- Started at pushed `8eeaee2` on clean `main`. Added tests for exact output counts, unselected overlap, the WAL coverage revision, and pinned readers. The original merge failed the expected output count after a full compaction that included the older value.
+- Added an all-level closure check for unsplit bottom-level merges and repeated the check after detached work. The output streams past eligible DELETE-led groups using a budgeted key buffer and retains the highest input revision. The current TTL read rule continues to apply to retained expired PUTs.
+- V072 passed focused compaction, read-view and process-crash tests. GCC Debug, Clang Release, ASan/UBSan/LSan and Docker Release passed 26/26 each. The Docker TSan workaround ran four concurrency targets five times each. P3.10 is DONE.
+
 ## 9. Current handoff
 
 - **Current milestone:** P3 — compaction, concurrency, snapshots and bounded resources.
-- **Next task ID:** P3.10.
-- **Next action:** Implement safe reclamation of DELETE masks whose older revisions cannot remain visible anywhere in the durable catalog.
-- **Next commands:** In `tests/native/compaction.c`, add fixtures that inspect a removable tombstone, a mask with an older value outside selected inputs, an active snapshot, and the highest-sequence tombstone followed by reopen and reinsertion. In `src/storage/compaction.c`, establish closure across all relevant levels before excluding a mask. In `src/storage/recovery.c`, verify that WAL replay still starts at the same coverage boundary. A conservative first rule can retain the largest sequence in every merge. Keep the latest expired PUT until reclamation semantics account for UTC corrections. Run the focused compaction and crash suites before the full matrix.
-- **Last verified good checkpoint:** V071 shadowed PUT collection based on `a8a9b4a`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records V070 and V071.
-- **Working-tree state:** V071 contains the compaction change, regression and documentation. Confirm with `git status --short --branch`.
+- **Next task ID:** P3.11.
+- **Next action:** Verify a multilevel merge whose selected SSTables exceed the configured engine memory budget, with concurrently observed history and recovery checks.
+- **Next commands:** Extend the gated merge fixture in `tests/native/read_view.c`. Build overlapping runs across at least three levels and check the selected input bytes in the installed catalog. Gate a detached merge on an output write, check `fastdb_stats` memory while work is charged, exercise a read, update and delete, and verify latest and snapshot revisions before and after publication and live results after reopen. Run focused compaction, read-view and process-crash targets and then the V072 matrix. Benchmark-scale RSS remains in P8.3.
+- **Last verified good checkpoint:** V072 DELETE reclamation based on `8eeaee2`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the red and green runs.
+- **Working-tree state:** V072 includes compaction, focused regressions and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
-- **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction keeps all tombstones and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, mask reclamation, power-loss tests and release-scale verification remain open.
+- **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

@@ -2,6 +2,8 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 typedef struct OutputTables {
     const FDBDirectory *dir;
@@ -10,6 +12,8 @@ typedef struct OutputTables {
     FDBSSTWriter *writer;
     size_t files;
     bool suffix;
+    unsigned char *dropped_key;
+    size_t dropped_key_size;
     char temp[sizeof(".sst-18446744073709551615.tmp")];
 } OutputTables;
 
@@ -56,11 +60,24 @@ static bool starts_new_key(const FDBSSTWriter *writer, FastDBSlice key)
 static FastDBStatus emit(void *context, const FDBRecord *record)
 {
     OutputTables *tables = context;
+    if (tables->dropped_key_size != 0) {
+        FastDBSlice dropped = {tables->dropped_key, tables->dropped_key_size};
+        if (fdb_compare(dropped, record->key) == 0)
+            return FASTDB_OK;
+        tables->dropped_key_size = 0;
+    }
     /* Merge order is newest first. The writer keeps each key group together. */
-    if (tables->limits->discard_shadowed_puts && record->kind == FDB_PUT &&
-        tables->writer != NULL &&
-        fdb_compare(fdb_sst_writer_last_key(tables->writer), record->key) == 0)
+    bool same_key = tables->writer != NULL &&
+                    fdb_compare(fdb_sst_writer_last_key(tables->writer), record->key) == 0;
+    if (tables->limits->discard_shadowed_puts && same_key && record->kind == FDB_PUT)
         return FASTDB_OK;
+    if (tables->dropped_key != NULL && !same_key && record->kind == FDB_DELETE &&
+        record->sequence < tables->limits->gc_anchor) {
+        /* Suppress the entire key group so an older PUT cannot resurface. */
+        memcpy(tables->dropped_key, record->key.data, record->key.size);
+        tables->dropped_key_size = record->key.size;
+        return FASTDB_OK;
+    }
     FastDBStatus status = FASTDB_OK;
     FastDBSlice boundary = tables->limits->split_after;
     bool suffix = boundary.size != 0 && fdb_compare(record->key, boundary) > 0;
@@ -99,9 +116,19 @@ FastDBStatus fdb_sst_merge_split(const FDBDirectory *dir, const FDBSSTReader *co
         !fdb_sst_writer_budget(&limits->output_table, &writer_bytes) ||
         writer_bytes > limits->max_working_bytes)
         return FASTDB_LIMIT_EXCEEDED;
+    size_t workspace = limits->max_working_bytes - writer_bytes;
     OutputTables tables = {.dir = dir, .limits = limits, .output = output};
-    FastDBStatus status = fdb_sst_merge(inputs, count, limits->max_working_bytes - writer_bytes,
-                                        emit, &tables);
+    if (limits->gc_anchor != 0) {
+        size_t key_bytes = limits->output_table.max_key_bytes;
+        if (key_bytes > workspace)
+            return FASTDB_LIMIT_EXCEEDED;
+        tables.dropped_key = malloc(key_bytes);
+        if (tables.dropped_key == NULL)
+            return FASTDB_OUT_OF_MEMORY;
+        workspace -= key_bytes;
+    }
+    FastDBStatus status = fdb_sst_merge(inputs, count, workspace, emit, &tables);
+    free(tables.dropped_key);
     if (status == FASTDB_OK && tables.writer != NULL)
         return finish_table(&tables);
     (void)fdb_sst_writer_destroy(tables.writer);

@@ -1008,6 +1008,61 @@ cmake --build /tmp/p310-tsan --parallel
 setarch x86_64 -R ctest --test-dir /tmp/p310-tsan -L concurrency --repeat until-fail:5 --output-on-failure
 ```
 
+## P3.10 completion with safe bottom-level DELETE reclamation (V072)
+
+Starting at `8eeaee2`, the test-first GCC Debug compaction run failed
+the exact output-count assertion. A full merge containing the older PUT
+still kept its eligible DELETE. The final cases verify that the range job
+keeps a DELETE while an unselected SSTable can contain the older value,
+and that the full merge reclaims the whole key group. A three-DELETE
+input leaves the highest revision as the sole output record and allocates
+the next revision after reopen. Tests also hold a snapshot before the job
+and capture another during detached output. Those snapshots preserve the
+original visibility and the latter snapshot keeps the original files
+through publication.
+
+The focused `fastdb_compaction`, `fastdb_read_view`, and
+`fastdb_public_crash` targets each passed 1/1. The public crash target
+exercised 27 process-kill cases across flush, checkpoint, and compaction,
+including a compaction with a reclaimable DELETE. This exercises process
+termination and restart on the Docker filesystem.
+
+The following full profiles ran in the V064 toolchain container with the
+source mounted read-only. GCC Debug, Clang Release and ASan/UBSan with leak
+detection each passed 26/26. The native Dockerfile Release build passed
+26/26 and produced `fastdb-native:local`. TSan with the V062 Docker
+workaround passed four concurrency targets five times each.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p310-mask-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p310-mask-red --target fastdb_compaction --parallel
+ctest --test-dir /tmp/p310-mask-red -R '^fastdb_compaction$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p310-mask-green -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p310-mask-green --parallel
+ctest --test-dir /tmp/p310-mask-green -R '^fastdb_compaction$' --output-on-failure
+ctest --test-dir /tmp/p310-mask-green -R '^fastdb_read_view$' --output-on-failure
+ctest --test-dir /tmp/p310-mask-green -R '^fastdb_public_crash$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p310-mask-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p310-mask-gcc --parallel 6
+ctest --test-dir /tmp/p310-mask-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p310-mask-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p310-mask-clang --parallel 6
+ctest --test-dir /tmp/p310-mask-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p310-mask-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p310-mask-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p310-mask-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p310-mask-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p310-mask-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p310-mask-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+On the host, `docker build -t fastdb-native:local .` ran the release
+suite in the Dockerfile.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

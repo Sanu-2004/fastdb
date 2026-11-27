@@ -78,6 +78,35 @@ static bool ranges_overlap(FastDBSlice left_min, FastDBSlice left_max,
     return fdb_compare(left_min, right_max) <= 0 && fdb_compare(right_min, left_max) <= 0;
 }
 
+uint64_t fdb_compaction_gc_anchor(const FDBManifest *manifest, const FDBCompactionPolicy *policy,
+                                   const FDBCompactionPlan *plan, const uint64_t *input_ids)
+{
+    if (plan->destination_level != policy->levels - 1 || plan->split_after.size != 0)
+        return 0;
+    FastDBSlice minimum = {0}, maximum = {0};
+    uint64_t anchor = 0;
+    for (size_t i = 0; i < plan->count; ++i) {
+        const FDBManifestEntry *entry = find_input(manifest, input_ids[i]);
+        if (entry == NULL)
+            return 0;
+        if (i == 0 || fdb_compare(entry->min_key, minimum) < 0)
+            minimum = entry->min_key;
+        if (i == 0 || fdb_compare(entry->max_key, maximum) > 0)
+            maximum = entry->max_key;
+        if (entry->sequence_end > anchor)
+            anchor = entry->sequence_end;
+    }
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const FDBManifestEntry *entry = &manifest->entries[i];
+        /* Newer tables cannot contain an older value exposed by dropping these masks. */
+        if (entry->kind == FDB_FILE_SSTABLE && entry->sequence_begin <= anchor &&
+            ranges_overlap(minimum, maximum, entry->min_key, entry->max_key) &&
+            !selected(entry->id, input_ids, plan->count))
+            return 0;
+    }
+    return anchor;
+}
+
 static FastDBStatus validate_inputs(const Build *build)
 {
     const FDBManifest *manifest = &build->set->catalog.view;
@@ -133,7 +162,8 @@ static FastDBStatus copy_retained(Build *build)
     return FASTDB_OK;
 }
 
-static FastDBStatus write_outputs(Build *build, FDBMergeLimits limits,
+static FastDBStatus write_outputs(Build *build, const FDBCompactionPolicy *policy,
+                                   FDBMergeLimits limits,
                                    pthread_mutex_t *mutex)
 {
     FDBWalSet *set = build->set;
@@ -199,6 +229,10 @@ static FastDBStatus write_outputs(Build *build, FDBMergeLimits limits,
         }
         if (status == FASTDB_OK && mutex != NULL)
             status = validate_inputs(build);
+        if (status == FASTDB_OK && mutex != NULL && limits.gc_anchor != 0 &&
+            limits.gc_anchor != fdb_compaction_gc_anchor(&set->catalog.view, policy,
+                                                         build->plan, build->input_ids))
+            status = FASTDB_CONFLICT;
     }
     for (size_t i = 0; i < count; ++i) {
         FastDBStatus closed = fdb_sst_reader_close((FDBSSTReader *)readers[i]);
@@ -267,7 +301,7 @@ FastDBStatus fdb_compact_once(FDBWalSet *set, const FDBCompactionPolicy *policy,
     Build build = {.set = set, .plan = plan, .input_ids = input_ids};
     FastDBStatus status = allocate_candidate(&build);
     if (status == FASTDB_OK)
-        status = write_outputs(&build, *limits, mutex);
+        status = write_outputs(&build, policy, *limits, mutex);
     size_t outputs = build.candidate.view.count;
     if (status == FASTDB_OK)
         status = copy_retained(&build);
