@@ -200,22 +200,27 @@ conservative leaf and directory bounds so flush and replay have room.
 
 ### Optional SSTable compression
 
-Build with `-DFASTDB_ENABLE_LZ4=ON` and `liblz4` 1.9.4 or newer. The
-CMake build uses `pkg-config` to locate the library. The native image can
-enable it with `docker build --build-arg FASTDB_ENABLE_LZ4=ON .`. Both
-build options default to off.
+Build with `-DFASTDB_ENABLE_LZ4=ON` and `liblz4` 1.9.4 or newer, or
+`-DFASTDB_ENABLE_ZSTD=ON` and the static `libzstd` 1.5.4 or newer.
+Both build options default to off and may be enabled together. The native
+Dockerfile accepts the same names as build arguments. CMake locates LZ4
+through `pkg-config` and Zstd through its CMake package. Zstd uses a
+position-independent static archive for its fixed-workspace API.
 
-In either persistent mode, select `FASTDB_COMPRESSION_LZ4` with
+In either persistent mode, select `FASTDB_COMPRESSION_LZ4` or
+`FASTDB_COMPRESSION_ZSTD` with
 `fastdb_options_set_sstable_compression` before opening the database.
 This enables v2 for new output. `FASTDB_COMPRESSION_NONE` selects
 uncompressed output while preserving the selected table version. The
 option applies on reopen. Reader codec selection follows each file.
-A codec-disabled build returns `FASTDB_UNSUPPORTED` for LZ4 options and
-files that declare LZ4.
+A build returns `FASTDB_UNSUPPORTED` for options or files declaring a
+codec that it lacks.
 
-The writer budgets its compression state and output buffer. The enabled
-build reserves the bounded decode margin for readers so mixed files
-share the same admission rules. A block stays raw unless compression
+The writer budgets codec state and output. LZ4 uses a bounded in-place
+decode margin. Zstd uses a fixed decoder context and disjoint input and
+output buffers. Recovery reserves the largest required reader workspace
+before decoding a committed table. A reopen with insufficient memory
+returns `FASTDB_LIMIT_EXCEEDED`. A block stays raw unless compression
 saves at least about one eighth of its size. Cache bytes reflect the
 decoded block size. See [the format specification](FILE_FORMAT.md) for
 the envelope and integrity checks.
@@ -240,8 +245,10 @@ When `min_free_bytes` is nonzero, persistent writes query available filesystem
 space before appending the WAL frame; if the append requires WAL rotation, the
 estimate includes a new segment header and one maximum catalog image.
 Flush/checkpoint admission estimates table output from records plus one
-maximum catalog image. Compaction conservatively budgets twice the input file
-bytes plus one maximum catalog image. A low estimate returns
+maximum catalog image. Compaction budgets twice each input's stored bytes
+and one maximum catalog image. For a file declaring a codec, it also
+considers the record count and configured maximum per-record output
+overhead to cover expansion to raw blocks. A low space estimate returns
 `FASTDB_LIMIT_EXCEEDED` before the operation
 starts. A failed space query returns `FASTDB_IO_ERROR`. These checks are
 admission estimates, not reservations: another process, filesystem quota, or

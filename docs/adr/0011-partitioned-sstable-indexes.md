@@ -21,11 +21,14 @@ preserving one atomic catalog publication.
 
 ### Optional compression
 
-V2 reuses the properties codec field for LZ4. Each index entry addresses
+V2 reuses the properties codec field for LZ4 and Zstd. Each index entry addresses
 the stored block, and a block stays in the raw representation when its
 compression savings are small. A compressed envelope checks the exact
-input and decoded lengths. The reader uses the library's documented
-in-place decompression margin, with the input at the end of its scratch
-space. Cache entries retain verified decoded data and the stored length
+input and decoded lengths. LZ4 uses its documented in-place margin. Zstd
+uses separate input/output buffers and statically linked fixed-size
+contexts supplied by the engine. Recovery accounts for decoder workspace
+from the actual files before walking them. The reservation remains in
+effect until that handle closes, so later reads and compaction can reuse
+the same bound. Cache entries retain verified decoded data and the stored length
 needed to match a future index entry. Uncompressed v1 and v2 formats can
-be read with or without the optional codec dependency.
+be read with or without either codec dependency.

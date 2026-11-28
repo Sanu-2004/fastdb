@@ -32,13 +32,19 @@ FastDBStatus fdb_catalog_open_table(const FDBDirectory *dir, const FDBManifestEn
 
 static FastDBStatus verify_table(const FDBDirectory *dir, const FDBManifestEntry *entry,
                                  const FDBSSTLimits *limits, size_t *corrupt_filters,
-                                 FDBSSTVisit restore, void *context)
+                                 const FDBRecoveryBudget *budget, FDBSSTVisit restore, void *context)
 {
     FDBSSTReader *reader;
     FastDBStatus status = fdb_catalog_open_table(dir, entry, limits, &reader);
     if (status != FASTDB_OK)
         return status;
-    status = fdb_sst_reader_walk(reader, restore, context);
+    if (budget != NULL) {
+        size_t reader_bytes;
+        status = fdb_sst_reader_workspace(reader, &reader_bytes) ?
+                 budget->reserve(budget->context, reader_bytes) : FASTDB_LIMIT_EXCEEDED;
+    }
+    if (status == FASTDB_OK)
+        status = fdb_sst_reader_walk(reader, restore, context);
     if (status == FASTDB_OK &&
         !fdb_add_size(*corrupt_filters, fdb_sst_reader_corrupt_partitions(reader), corrupt_filters))
         *corrupt_filters = SIZE_MAX;
@@ -49,7 +55,8 @@ static FastDBStatus verify_table(const FDBDirectory *dir, const FDBManifestEntry
 static FastDBStatus covered_sequence(const FDBDirectory *dir, const FDBManifestLimits *limits,
                                       const FDBSSTLimits *sst_limits, FDBStorageMode mode,
                                       uint64_t *covered, size_t *corrupt_filters,
-                                      FDBSSTVisit restore, void *context)
+                                      const FDBRecoveryBudget *budget, FDBSSTVisit restore,
+                                      void *context)
 {
     *covered = 0;
     FDBManifestLoad manifest;
@@ -64,7 +71,7 @@ static FastDBStatus covered_sequence(const FDBDirectory *dir, const FDBManifestL
         const FDBManifestEntry *entry = &manifest.view.entries[i];
         if (entry->kind == FDB_FILE_WAL)
             continue;
-        status = verify_table(dir, entry, sst_limits, corrupt_filters, restore, context);
+        status = verify_table(dir, entry, sst_limits, corrupt_filters, budget, restore, context);
         if (status == FASTDB_OK && entry->sequence_end > *covered)
             *covered = entry->sequence_end;
     }
@@ -200,8 +207,8 @@ FastDBStatus fdb_storage_prepare_maintenance(FDBWalSet *set)
 
 static FastDBStatus recover(const FDBDirectory *dir, const FDBManifestLimits *manifest_limits,
                              const FDBWalLimits *wal_limits, const FDBSSTLimits *sst_limits,
-                             FDBStorageMode mode, const FDBWalReplay *replay, FDBSSTVisit restore,
-                             FDBWalSet *out)
+                             FDBStorageMode mode, const FDBRecoveryBudget *budget,
+                             const FDBWalReplay *replay, FDBSSTVisit restore, FDBWalSet *out)
 {
     *out = (FDBWalSet){.wal.fd = -1, .active_index = SIZE_MAX};
     if (!fdb_sst_valid_limits(sst_limits) || !fdb_wal_valid_limits(wal_limits))
@@ -209,7 +216,7 @@ static FastDBStatus recover(const FDBDirectory *dir, const FDBManifestLimits *ma
     uint64_t covered;
     size_t corrupt_filters = 0;
     FastDBStatus status = covered_sequence(dir, manifest_limits, sst_limits, mode, &covered,
-                                            &corrupt_filters, restore,
+                                            &corrupt_filters, budget, restore,
                                             replay == NULL ? NULL : replay->context);
     if (status != FASTDB_OK)
         return status;
@@ -225,16 +232,19 @@ static FastDBStatus recover(const FDBDirectory *dir, const FDBManifestLimits *ma
 
 FastDBStatus fdb_lsm_recover(const FDBDirectory *dir, const FDBManifestLimits *manifest_limits,
                              const FDBWalLimits *wal_limits, const FDBSSTLimits *sst_limits,
-                             const FDBWalReplay *replay, FDBWalSet *out)
+                             const FDBRecoveryBudget *budget, const FDBWalReplay *replay,
+                             FDBWalSet *out)
 {
-    return recover(dir, manifest_limits, wal_limits, sst_limits, FDB_MODE_LSM, replay, NULL, out);
+    return recover(dir, manifest_limits, wal_limits, sst_limits, FDB_MODE_LSM,
+                   budget, replay, NULL, out);
 }
 
 FastDBStatus fdb_checkpoint_recover(const FDBDirectory *dir,
                                     const FDBManifestLimits *manifest_limits,
                                     const FDBWalLimits *wal_limits, const FDBSSTLimits *sst_limits,
-                                    const FDBWalReplay *replay, FDBSSTVisit restore, FDBWalSet *out)
+                                    const FDBRecoveryBudget *budget, const FDBWalReplay *replay,
+                                    FDBSSTVisit restore, FDBWalSet *out)
 {
     return recover(dir, manifest_limits, wal_limits, sst_limits,
-                   FDB_MODE_MEMORY_PERSISTENT, replay, restore, out);
+                   FDB_MODE_MEMORY_PERSISTENT, budget, replay, restore, out);
 }

@@ -560,6 +560,61 @@ static void mixed_codec_compaction(void)
     remove_disk_fixture(path);
 }
 
+static void mixed_zstd_compaction(void)
+{
+    char path[] = "/tmp/fastdb-zstd-compaction.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+#ifdef FASTDB_HAVE_ZSTD
+    FastDBLimits limits;
+    fastdb_limits_default(&limits);
+    limits.max_key_bytes = 32;
+    limits.max_value_bytes = 128;
+    limits.max_batch_operations = 6;
+    limits.max_memory_bytes = 4 * 1024 * 1024;
+    OK(fastdb_options_set_limits(options, &limits));
+    const unsigned char payload[120] = {0};
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, payload, sizeof(payload)));
+    OK(fastdb_put(db, "z", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_ZSTD));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "k", 1, payload, sizeof(payload)));
+    OK(fastdb_delete(db, "z", 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+#ifdef FASTDB_HAVE_LZ4
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_LZ4));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "l", 1, payload, sizeof(payload)));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+#endif
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_NONE));
+    OK(fastdb_options_set_partitioned_sstables(options, false));
+    OK(fastdb_open(options, &db));
+    expect_missing(db, (FastDBSlice){"z", 1});
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){payload, sizeof(payload)}, 3);
+    OK(fastdb_compact(db));
+    OK(fastdb_close(db));
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){payload, sizeof(payload)}, 1);
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){payload, sizeof(payload)}, 3);
+#ifdef FASTDB_HAVE_LZ4
+    expect_value(db, (FastDBSlice){"l", 1}, (FastDBSlice){payload, sizeof(payload)}, 5);
+#endif
+    expect_missing(db, (FastDBSlice){"z", 1});
+    OK(fastdb_close(db));
+#else
+    STATUS(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_ZSTD), FASTDB_UNSUPPORTED);
+#endif
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     reclaim_shadowed_versions();
@@ -574,4 +629,5 @@ int main(void)
     compact_with_one_filter_buffer();
     mixed_partitioned_compaction();
     mixed_codec_compaction();
+    mixed_zstd_compaction();
 }

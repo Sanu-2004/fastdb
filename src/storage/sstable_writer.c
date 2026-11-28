@@ -262,7 +262,8 @@ static FastDBStatus flush_block(FDBSSTWriter *writer)
 
     const unsigned char *stored = block;
     if (writer->codec_workspace != NULL) {
-        size_t compressed = fdb_block_lz4_encode(block, size, writer->codec_workspace, &stored);
+        size_t compressed = fdb_block_encode(writer->limits.codec, block, size,
+                                              writer->codec_workspace, &stored);
         if (compressed != 0)
             size = compressed;
     }

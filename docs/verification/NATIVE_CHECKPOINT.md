@@ -1471,6 +1471,80 @@ docker run --rm --network none fastdb-native:lz4-local --version
 The two Docker Release suites passed 30/30 each and both runtime smoke
 commands printed `0.1.0`.
 
+## P4.5 Zstd and mixed codec verification (V081)
+
+The starting commit was `b6d81c6`. The LZ4-enabled GCC Debug baseline
+passed 30/30 in `fastdb-local-toolchain:lz4`. The test-first build below
+then failed on the missing Zstd codec identifiers. The later two-level
+headroom test reproduced a successful compressed-to-raw compaction when
+only 4 KiB was reported free for an 8 KiB record. The red command uses
+the implementation before the disk estimate fix.
+
+```sh
+cmake -S /repo -B /tmp/p45-zstd-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p45-zstd-red --target fastdb_sstable_codec --parallel 6
+cmake -S /repo -B /tmp/p45-space-red -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_ENABLE_LZ4=ON -DFASTDB_ENABLE_ZSTD=ON
+cmake --build /tmp/p45-space-red --target fastdb_lsm_fault --parallel 6
+ctest --test-dir /tmp/p45-space-red -R fastdb_lsm_fault --output-on-failure
+```
+
+The final native matrix used read-only source mounts in Debian Bookworm
+containers with LZ4 1.9.4 and Zstd 1.5.4. The GCC Debug suite passed
+30/30 in all four build combinations. Dual-codec Clang Release and
+ASan/UBSan with leak detection also passed 30/30. After adding explicit
+Zstd frame shape cases, the dual-codec GCC Debug suite passed 30/30
+again, and the Clang Release and sanitizer codec case each passed five
+repetitions. The packaged static and shared C examples each printed
+`hello`. The shared library exports no defined Zstd symbols.
+The prebuilt dependency libraries were outside sanitizer instrumentation.
+
+```sh
+for lz4 in OFF ON; do
+  for zstd in OFF ON; do
+    dir="/tmp/p45-gcc-${lz4}-${zstd}"
+    CC=gcc cmake -S /repo -B "$dir" -DCMAKE_BUILD_TYPE=Debug \
+      -DFASTDB_ENABLE_LZ4="$lz4" -DFASTDB_ENABLE_ZSTD="$zstd"
+    cmake --build "$dir" --parallel 3
+    ctest --test-dir "$dir" --output-on-failure
+  done
+done
+CC=clang cmake -S /repo -B /tmp/p45-final-clang -DCMAKE_BUILD_TYPE=Release \
+  -DFASTDB_ENABLE_LZ4=ON -DFASTDB_ENABLE_ZSTD=ON
+cmake --build /tmp/p45-final-clang --parallel 3
+ctest --test-dir /tmp/p45-final-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p45-final-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_ENABLE_LZ4=ON -DFASTDB_ENABLE_ZSTD=ON \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p45-final-asan --parallel 3
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p45-final-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p45-final-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_ENABLE_LZ4=ON -DFASTDB_ENABLE_ZSTD=ON \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p45-final-tsan --parallel 3
+setarch x86_64 -R ctest --test-dir /tmp/p45-final-tsan -L concurrency \
+  --repeat until-fail:5 --output-on-failure
+```
+
+TSan passed 35 executions across seven concurrency targets using the
+V062 Docker setup. The codec fixtures verify raw fallback, compressed
+cache accounting, outer CRC, malformed payloads, decoded-size caps,
+oversized Zstd windows, skippable and trailing frames, and disabled or
+unknown codecs. The integration cases verify mixed plain/LZ4/Zstd
+compaction and recover a Zstd checkpoint with plain writes selected
+after a low-memory reopen is rejected.
+
+```sh
+docker build -t fastdb-native:p45-default .
+docker build --build-arg FASTDB_ENABLE_LZ4=ON --build-arg FASTDB_ENABLE_ZSTD=ON \
+  -t fastdb-native:p45-dual .
+docker run --rm --network none fastdb-native:p45-default --version
+docker run --rm --network none fastdb-native:p45-dual --version
+```
+
+Both native Docker Release builds passed 30/30 and printed `0.1.0` in
+their runtime smoke checks.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

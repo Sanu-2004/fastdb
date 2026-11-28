@@ -249,6 +249,64 @@ static void low_space_admission(void)
     remove_disk_fixture(path);
 }
 
+#if defined(FASTDB_HAVE_LZ4) || defined(FASTDB_HAVE_ZSTD)
+static void compressed_output_space(void)
+{
+    char path[] = "/tmp/fastdb-lsm-codec-space.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    FastDBLimits limits;
+    fastdb_limits_default(&limits);
+    limits.max_key_bytes = 32;
+    limits.max_value_bytes = 8192;
+    limits.max_memory_bytes = 4 * 1024 * 1024;
+    FastDBPersistentOptions storage;
+    fastdb_persistent_options_default(&storage);
+    storage.max_wal_segment_bytes = 20000;
+    storage.max_wal_frame_bytes = 9000;
+    storage.target_block_bytes = 80;
+    storage.max_index_bytes = 1024;
+    storage.max_filter_bytes = 320;
+    storage.max_catalog_files = 16;
+    storage.max_catalog_bytes = 2048;
+    storage.min_free_bytes = 1024;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    OK(fastdb_options_set_limits(options, &limits));
+    FastDBCompactionOptions compaction;
+    fastdb_compaction_options_default(&compaction);
+    compaction.max_levels = 2;
+    OK(fastdb_options_set_compaction(options, &compaction));
+#ifdef FASTDB_HAVE_LZ4
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_LZ4));
+#else
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_ZSTD));
+#endif
+    Injection injection = {.override_space = true, .available_bytes = UINT64_MAX};
+    const FDBFs fs = {reject, &injection};
+    FastDB *db;
+    unsigned char payload[8192] = {0};
+    OK(fdb_open_with_fs(options, &fs, &db));
+    OK(fastdb_put(db, "a", 1, payload, sizeof(payload)));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_NONE));
+    OK(fdb_open_with_fs(options, &fs, &db));
+    injection.available_bytes = 4096;
+    STATUS(fastdb_compact(db), FASTDB_LIMIT_EXCEEDED);
+    CHECK(table_file_count(path) == 1);
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){payload, sizeof(payload)}, 1);
+    injection.available_bytes = UINT64_MAX;
+    OK(fastdb_compact(db));
+    CHECK(table_file_count(path) == 1);
+    OK(fastdb_close(db));
+    OK(fdb_open_with_fs(options, &fs, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){payload, sizeof(payload)}, 1);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+#endif
+
 static void sync_failure(void)
 {
     char path[] = "/tmp/fastdb-lsm-uncertain.XXXXXXXX";
@@ -434,6 +492,9 @@ int main(void)
     persistent_descriptor_peak();
     descriptor_budget_validation();
     low_space_admission();
+#if defined(FASTDB_HAVE_LZ4) || defined(FASTDB_HAVE_ZSTD)
+    compressed_output_space();
+#endif
     sync_failure();
     flush_and_read_failure();
     asynchronous_close();

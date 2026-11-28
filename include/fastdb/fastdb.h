@@ -59,7 +59,8 @@ typedef enum FastDBDurability {
 
 typedef enum FastDBCompression {
     FASTDB_COMPRESSION_NONE = 0,
-    FASTDB_COMPRESSION_LZ4 = 1
+    FASTDB_COMPRESSION_LZ4 = 1,
+    FASTDB_COMPRESSION_ZSTD = 2
 } FastDBCompression;
 
 typedef enum FastDBMode {
@@ -162,7 +163,7 @@ FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastD
                                                    const FastDBPersistentOptions *settings);
 /* Persistent modes only. Enable v2 partitioned output on the next open. */
 FASTDB_API FastDBStatus fastdb_options_set_partitioned_sstables(FastDBOptions *options, bool enabled);
-/* LZ4 requires a codec-enabled build and selects v2 for new output. */
+/* Optional codecs require a codec-enabled build and select v2 for new output. */
 FASTDB_API FastDBStatus fastdb_options_set_sstable_compression(FastDBOptions *options,
                                                                FastDBCompression compression);
 /* Interval durability only. Positive milliseconds, default 100 when unset. */

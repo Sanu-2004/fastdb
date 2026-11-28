@@ -47,7 +47,7 @@ static void write_child(const char *path, int pipe)
     FDBDirectory dir;
     OK(fdb_dir_lock(path, &fs, &dir));
     FDBWalSet set;
-    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, NULL, &set));
+    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, NULL, NULL, &set));
     OK(fdb_wal_set_append(&set, acknowledged, 2, true));
     CHECK(write(pipe, "A", 1) == 1);
     signal.armed = true;
@@ -107,7 +107,7 @@ int main(void)
     OK(fdb_dir_lock(path, NULL, &dir));
     FDBWalSet set;
     size_t frames = 0;
-    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits,
+    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, NULL,
                        &(FDBWalReplay){.visit = check_acknowledged, .context = &frames}, &set));
     CHECK(frames == 1 && set.wal.sequence == 2);
     OK(fdb_wal_set_append(&set, interrupted, 2, true));

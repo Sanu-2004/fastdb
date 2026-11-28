@@ -78,7 +78,8 @@ static void verify_flush(const FDBDirectory *dir, Fault *fault)
     OK(fdb_manifest_publish(dir, &manifest_limits, 0, &manifest));
     FDBWalSet set;
     FDBTree tree = {0};
-    OK(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, &(FDBWalReplay){.visit = replay, .context = &tree}, &set));
+    OK(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, NULL,
+                       &(FDBWalReplay){.visit = replay, .context = &tree}, &set));
     OK(fdb_flush_l0(&set, &tree, 0, &sst_limits));
     const FDBRecord first[] = {
         {{"k", 1}, {"value", 5}, 1, 0, FDB_PUT},
@@ -109,7 +110,8 @@ static void verify_flush(const FDBDirectory *dir, Fault *fault)
     OK(fdb_fs_close(fd));
     check_table(dir, "sst-00000000000000000003", 3, 3);
     *fault = (Fault){FDB_FS_SYNC, 1};
-    STATUS(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, &(FDBWalReplay){.visit = replay, .context = &tree}, &set),
+    STATUS(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, NULL,
+                            &(FDBWalReplay){.visit = replay, .context = &tree}, &set),
            FASTDB_IO_ERROR);
     OK(fdb_dir_open_file(dir, "wal-00000000000000000001", FDB_FILE_READ, &fd));
     OK(fdb_fs_close(fd));
@@ -117,7 +119,8 @@ static void verify_flush(const FDBDirectory *dir, Fault *fault)
     const char *unreserved = "sst-00000000000000000999";
     OK(fdb_dir_open_file(dir, unreserved, FDB_FILE_CREATE_NEW, &fd));
     OK(fdb_fs_close(fd));
-    OK(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, &(FDBWalReplay){.visit = replay, .context = &tree}, &set));
+    OK(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, NULL,
+                       &(FDBWalReplay){.visit = replay, .context = &tree}, &set));
     STATUS(fdb_dir_open_file(dir, "wal-00000000000000000001", FDB_FILE_READ, &fd), FASTDB_NOT_FOUND);
     STATUS(fdb_dir_open_file(dir, ".sst-00000000000000000002.tmp", FDB_FILE_READ, &fd),
            FASTDB_NOT_FOUND);
@@ -138,7 +141,8 @@ static void verify_flush(const FDBDirectory *dir, Fault *fault)
     check_table(dir, "sst-00000000000000000005", 5, 4);
     OK(fdb_wal_set_close(&set));
     OK(fdb_dir_unlink(dir, "sst-00000000000000000005"));
-    STATUS(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, &(FDBWalReplay){.visit = replay, .context = &tree}, &set),
+    STATUS(fdb_lsm_recover(dir, &manifest_limits, &wal_limits, &sst_limits, NULL,
+                            &(FDBWalReplay){.visit = replay, .context = &tree}, &set),
            FASTDB_CORRUPTION);
     OK(fdb_dir_open_file(dir, "wal-00000000000000000004", FDB_FILE_READ, &fd));
     OK(fdb_fs_close(fd));
@@ -158,7 +162,7 @@ static void verify_sealed_prefix(bool uncertain)
     FDBTree frozen = {0}, active = {0};
     const FDBWalReplay restore = {.visit = replay, .context = &active};
     FDBWalSet set;
-    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, &restore, &set));
+    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, NULL, &restore, &set));
     const FDBRecord first[] = {
         {{"k", 1}, {"old", 3}, 1, 0, FDB_PUT},
         {{"frozen", 6}, {"safe", 4}, 2, 0, FDB_PUT},
@@ -197,7 +201,7 @@ static void verify_sealed_prefix(bool uncertain)
     }
     fdb_tree_destroy(&frozen);
 
-    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, &restore, &set));
+    OK(fdb_lsm_recover(&dir, &manifest_limits, &wal_limits, &sst_limits, NULL, &restore, &set));
     CHECK(set.active_index == 1 && set.catalog.view.entries[set.active_index].id == active_id);
     CHECK(set.catalog.view.count == 3 && set.catalog.view.sequence == 4 && set.wal.sequence == 5);
     CHECK(active.count == 2 && fdb_tree_get(&active, first[1].key) == NULL);

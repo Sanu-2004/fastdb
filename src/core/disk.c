@@ -262,6 +262,32 @@ static FastDBStatus ensure_manifest(FDBDisk *disk)
            fdb_manifest_publish(&disk->dir, &disk->manifest, 0, &manifest) : status;
 }
 
+typedef struct RecoveryWorkspace {
+    FastDB *db;
+    size_t flush_threshold;
+} RecoveryWorkspace;
+
+static FastDBStatus reserve_recovery_reader(void *context, size_t reader_bytes)
+{
+    RecoveryWorkspace *workspace = context;
+    FastDB *db = workspace->db;
+    FDBDisk *disk = db->disk;
+    if (reader_bytes <= disk->reader_bytes)
+        return FASTDB_OK;
+    size_t table = reader_bytes > disk->writer_bytes ? reader_bytes : disk->writer_bytes;
+    if (workspace->flush_threshold != 0 &&
+        !fdb_add_size(reader_bytes, disk->writer_bytes, &table))
+        return FASTDB_LIMIT_EXCEEDED;
+    size_t extra = table - disk->table_workspace;
+    size_t remaining = db->limits.max_memory_bytes - db->reserved_bytes - fdb_memory_bytes(db);
+    if (extra > remaining || workspace->flush_threshold > remaining - extra)
+        return FASTDB_LIMIT_EXCEEDED;
+    db->reserved_bytes += extra;
+    disk->reader_bytes = reader_bytes;
+    disk->table_workspace = table;
+    return FASTDB_OK;
+}
+
 FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs *fs,
                            const FDBWalReplay *replay, FDBSSTVisit restore)
 {
@@ -281,11 +307,13 @@ FastDBStatus fdb_disk_open(FastDB *db, const FastDBOptions *options, const FDBFs
     db->disk = disk;
     status = ensure_manifest(disk);
     if (status == FASTDB_OK) {
+        RecoveryWorkspace workspace = {db, options->flush_threshold};
+        const FDBRecoveryBudget budget = {reserve_recovery_reader, &workspace};
         status = disk->mode == FASTDB_MODE_LSM ?
                  fdb_lsm_recover(&disk->dir, &disk->manifest, &disk->wal, &disk->table,
-                                  replay, &disk->log) :
+                                  &budget, replay, &disk->log) :
                  fdb_checkpoint_recover(&disk->dir, &disk->manifest, &disk->wal, &disk->table,
-                                         replay, restore, &disk->log);
+                                         &budget, replay, restore, &disk->log);
     }
     if (status == FASTDB_OK && disk->durability == FASTDB_DURABILITY_INTERVAL) {
         uint32_t interval = options->sync_interval_ms == 0 ? DEFAULT_SYNC_INTERVAL_MS :
@@ -828,6 +856,42 @@ FastDBStatus fdb_disk_flush_commit(FDBDisk *disk, FDBTree *tree, const FDBFlushO
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(&disk->log) : status;
 }
 
+static FastDBStatus check_compaction_space(const FDBDisk *disk, const size_t *inputs, size_t count)
+{
+    if (disk->min_free_bytes == 0)
+        return FASTDB_OK;
+    uint64_t estimate = disk->manifest.max_bytes;
+    /* Allow a separate block, Bloom partition, leaf and table per record. */
+    uint64_t record_bytes = disk->table.max_value_bytes + 5 * (uint64_t)disk->table.max_key_bytes +
+                            256 + ((uint64_t)disk->table.bloom_bits_per_key + 7) / 8;
+    for (size_t i = 0; i < count; ++i) {
+        const FDBManifestEntry *entry = &disk->log.catalog.view.entries[inputs[i]];
+        if (entry->bytes > UINT64_MAX / 2)
+            return FASTDB_LIMIT_EXCEEDED;
+        uint64_t bytes = entry->bytes * 2;
+        FDBSSTReader *reader;
+        FastDBStatus status = fdb_catalog_open_table(&disk->dir, entry, &disk->table, &reader);
+        if (status != FASTDB_OK)
+            return status;
+        bool compressed = fdb_sst_reader_declares_codec(reader);
+        uint64_t records = fdb_sst_reader_properties(reader)->records;
+        status = fdb_sst_reader_close(reader);
+        if (status != FASTDB_OK)
+            return status;
+        if (compressed) {
+            if (records > UINT64_MAX / record_bytes)
+                return FASTDB_LIMIT_EXCEEDED;
+            uint64_t expanded = records * record_bytes;
+            if (expanded > bytes)
+                bytes = expanded;
+        }
+        if (estimate > UINT64_MAX - bytes)
+            return FASTDB_LIMIT_EXCEEDED;
+        estimate += bytes;
+    }
+    return check_free_space(disk, estimate);
+}
+
 FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
                                const FastDBRange *range)
 {
@@ -916,23 +980,7 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         }
         for (size_t i = 0; i < plan.count; ++i)
             input_ids[i] = disk->log.catalog.view.entries[inputs[i]].id;
-        uint64_t output_estimate = 0;
-        for (size_t i = 0; i < plan.count; ++i) {
-            uint64_t bytes = disk->log.catalog.view.entries[inputs[i]].bytes;
-            if (bytes > UINT64_MAX / 2 || output_estimate > UINT64_MAX - bytes * 2) {
-                status = FASTDB_LIMIT_EXCEEDED;
-                break;
-            }
-            output_estimate += bytes * 2;
-        }
-        if (status == FASTDB_OK) {
-            if (output_estimate > UINT64_MAX - disk->manifest.max_bytes)
-                status = FASTDB_LIMIT_EXCEEDED;
-            else
-                output_estimate += disk->manifest.max_bytes;
-        }
-        if (status == FASTDB_OK)
-            status = check_free_space(disk, output_estimate);
+        status = check_compaction_space(disk, inputs, plan.count);
         if (status != FASTDB_OK)
             break;
         limits.max_working_bytes = available - selection_bytes;

@@ -280,7 +280,8 @@ FastDBStatus fastdb_options_set_sstable_compression(FastDBOptions *options,
                                                      FastDBCompression compression)
 {
     if (options == NULL || options->path == NULL ||
-        (compression != FASTDB_COMPRESSION_NONE && compression != FASTDB_COMPRESSION_LZ4))
+        (compression != FASTDB_COMPRESSION_NONE && compression != FASTDB_COMPRESSION_LZ4 &&
+         compression != FASTDB_COMPRESSION_ZSTD))
         return FASTDB_INVALID_ARGUMENT;
     if (!fdb_block_codec_supported((uint32_t)compression))
         return FASTDB_UNSUPPORTED;

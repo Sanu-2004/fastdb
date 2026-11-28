@@ -62,6 +62,7 @@ FastDBStatus fdb_sst_reader_open(const FDBDirectory *dir, const char *name, uint
 /* Configure before opening iterators. The database owns the cache. */
 void fdb_sst_reader_set_cache(FDBSSTReader *reader, FDBBlockCache *cache);
 const FDBSSTProperties *fdb_sst_reader_properties(const FDBSSTReader *reader);
+bool fdb_sst_reader_declares_codec(const FDBSSTReader *reader);
 size_t fdb_sst_reader_corrupt_partitions(const FDBSSTReader *reader);
 FastDBStatus fdb_sst_reader_verify(FDBSSTReader *reader);
 typedef FastDBStatus (*FDBSSTVisit)(void *context, const FDBRecord *record);

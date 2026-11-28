@@ -58,6 +58,8 @@ struct FDBSSTIterator {
     size_t row;
     size_t record_bytes;
     size_t block_capacity;
+    void *decode_state;
+    size_t decode_state_size;
     FDBRecord record;
     FastDBStatus status;
     bool valid;
@@ -80,14 +82,16 @@ typedef struct FilterRegion {
 bool fdb_sst_reader_budget(const FDBSSTLimits *limits, size_t *bytes)
 {
     size_t keys = limits->max_key_bytes;
-    size_t block_capacity;
+    size_t block_capacity, decode_state_size;
     size_t blocks = limits->max_index_bytes / SST_MIN_INDEX_ENTRY_BYTES;
     *bytes = sizeof(FDBSSTReader) + sizeof(FDBSSTIterator) +
              SST_PROPERTIES_HEADER_BYTES + SST_CRC_BYTES;
-    return fdb_block_decode_workspace(limits->max_block_bytes, &block_capacity) &&
+    return fdb_block_decode_workspace(limits->codec, limits->max_block_bytes,
+                                      &block_capacity, &decode_state_size) &&
            blocks <= SIZE_MAX / sizeof(IndexEntry) &&
            fdb_add_size(*bytes, blocks * sizeof(IndexEntry), bytes) &&
            fdb_add_size(*bytes, block_capacity, bytes) &&
+           fdb_add_size(*bytes, decode_state_size, bytes) &&
            fdb_add_size(*bytes, limits->max_index_bytes, bytes) &&
            fdb_add_size(*bytes, limits->max_filter_bytes, bytes) &&
            keys <= (SIZE_MAX - *bytes) / 2 &&
@@ -96,7 +100,9 @@ bool fdb_sst_reader_budget(const FDBSSTLimits *limits, size_t *bytes)
 
 bool fdb_sst_reader_workspace(const FDBSSTReader *reader, size_t *bytes)
 {
-    return fdb_sst_reader_budget(&reader->limits, bytes);
+    FDBSSTLimits limits = reader->limits;
+    limits.codec = (uint8_t)reader->codec;
+    return fdb_sst_reader_budget(&limits, bytes);
 }
 
 static FastDBStatus read_exact(const FDBSSTReader *reader, uint64_t offset, void *data, size_t size)
@@ -447,6 +453,11 @@ const FDBSSTProperties *fdb_sst_reader_properties(const FDBSSTReader *reader)
     return &reader->properties;
 }
 
+bool fdb_sst_reader_declares_codec(const FDBSSTReader *reader)
+{
+    return reader->codec != FASTDB_COMPRESSION_NONE;
+}
+
 void fdb_sst_reader_set_cache(FDBSSTReader *reader, FDBBlockCache *cache)
 {
     reader->cache = cache;
@@ -469,11 +480,12 @@ size_t fdb_sst_reader_corrupt_partitions(const FDBSSTReader *reader)
 FastDBStatus fdb_sst_iter_open(const FDBSSTReader *reader, FDBSSTIterator **out)
 {
     *out = NULL;
-    size_t bytes, block_capacity;
+    size_t bytes, block_capacity, decode_state_size;
     size_t filter_capacity = reader->streamed_filter_bytes;
     if (reader->partitioned && (reader->features & SST_FEATURE_BLOOM) != 0 && reader->max_leaf_bytes != 0)
         filter_capacity = reader->limits.max_filter_bytes;
-    if (!fdb_block_decode_workspace(reader->limits.max_block_bytes, &block_capacity) ||
+    if (!fdb_block_decode_workspace(reader->codec, reader->limits.max_block_bytes,
+                                    &block_capacity, &decode_state_size) ||
         !fdb_add_size(sizeof(FDBSSTIterator), block_capacity, &bytes) ||
         !fdb_add_size(bytes, filter_capacity, &bytes))
         return FASTDB_LIMIT_EXCEEDED;
@@ -481,6 +493,14 @@ FastDBStatus fdb_sst_iter_open(const FDBSSTReader *reader, FDBSSTIterator **out)
     if (iter == NULL)
         return FASTDB_OUT_OF_MEMORY;
     *iter = (FDBSSTIterator){.reader = reader, .block_capacity = block_capacity};
+    if (decode_state_size != 0) {
+        iter->decode_state = malloc(decode_state_size);
+        if (iter->decode_state == NULL) {
+            fdb_sst_iter_close(iter);
+            return FASTDB_OUT_OF_MEMORY;
+        }
+        iter->decode_state_size = decode_state_size;
+    }
     if (reader->max_leaf_bytes != 0) {
         size_t entries = reader->max_leaf_bytes / SST_MIN_INDEX_ENTRY_BYTES;
         if (entries > SIZE_MAX / sizeof(*iter->leaf)) {
@@ -644,9 +664,11 @@ static FastDBStatus load_block(FDBSSTIterator *iter, size_t index, const FDBBloo
         if (status != FASTDB_OK)
             return status;
         block = stored;
-        if (reader->codec == FASTDB_COMPRESSION_LZ4 && fdb_decode_u32(stored) == SST_LZ4_BLOCK_MAGIC) {
-            status = fdb_block_lz4_decode(stored, size, iter->scratch, reader->limits.max_block_bytes,
-                                          &size);
+        uint32_t magic = fdb_block_codec_magic(reader->codec);
+        if (magic != 0 && fdb_decode_u32(stored) == magic) {
+            status = fdb_block_decode(reader->codec, stored, size, iter->scratch,
+                                      reader->limits.max_block_bytes, iter->decode_state,
+                                      iter->decode_state_size, &size);
             if (status != FASTDB_OK)
                 return status;
             block = iter->scratch;
@@ -876,6 +898,7 @@ void fdb_sst_iter_close(FDBSSTIterator *iter)
     if (iter != NULL && iter->pin != NULL)
         fdb_block_cache_release(iter->reader->cache, iter->pin);
     if (iter != NULL) {
+        free(iter->decode_state);
         free(iter->leaf_image);
         free(iter->leaf);
     }

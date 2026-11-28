@@ -1,4 +1,5 @@
 #include "disk_fixture.h"
+#include "block_codec.h"
 #include "crc32c.h"
 #include "sstable_format.h"
 
@@ -16,15 +17,15 @@ static void write_at(int fd, uint64_t offset, const void *bytes, size_t size)
     CHECK(done == size);
 }
 
-static void codec_table(const FDBDirectory *dir)
+static void codec_table(const FDBDirectory *dir, FastDBCompression codec,
+                        uint32_t magic, bool enabled)
 {
     const FDBSSTLimits limits = {.max_key_bytes = 16, .max_value_bytes = 512,
         .target_block_bytes = 80, .max_block_bytes = 640, .max_index_bytes = 512,
         .partitioned = true};
     FDBSSTLimits write = limits;
-#ifdef FASTDB_HAVE_LZ4
-    write.codec = FASTDB_COMPRESSION_LZ4;
-#endif
+    if (enabled)
+        write.codec = (uint8_t)codec;
     FDBSSTWriter *writer;
     OK(fdb_sst_writer_open(dir, "codec", 55, &write, &writer));
     unsigned char repeated[512], random[512];
@@ -54,11 +55,19 @@ static void codec_table(const FDBDirectory *dir)
     CHECK(size <= sizeof(image));
     read_at(fd, properties, image, size);
     FDBSSTReader *reader;
-#ifdef FASTDB_HAVE_LZ4
-    CHECK(fdb_decode_u32(image + 40) == FASTDB_COMPRESSION_LZ4);
+    if (!enabled) {
+        fdb_encode_u32(image + 40, (uint32_t)codec);
+        fdb_encode_u32(image + size - SST_CRC_BYTES, fdb_crc32c(image, size - SST_CRC_BYTES));
+        write_at(fd, properties, image, size);
+        STATUS(fdb_sst_reader_open(dir, "codec", 55, &limits, &reader), FASTDB_UNSUPPORTED);
+        OK(fdb_fs_close(fd));
+        OK(fdb_dir_unlink(dir, "codec"));
+        return;
+    }
+    CHECK(fdb_decode_u32(image + 40) == (uint32_t)codec);
     unsigned char header[SST_BLOCK_HEADER_BYTES];
     read_at(fd, SST_HEADER_BYTES, header, sizeof(header));
-    CHECK(fdb_decode_u32(header) == SST_LZ4_BLOCK_MAGIC);
+    CHECK(fdb_decode_u32(header) == magic);
     uint64_t second_offset = SST_HEADER_BYTES + sizeof(header) + fdb_decode_u32(header + 8);
     unsigned char second_magic[4];
     read_at(fd, second_offset, second_magic, sizeof(second_magic));
@@ -120,15 +129,94 @@ static void codec_table(const FDBDirectory *dir)
     OK(fdb_sst_reader_open(dir, "codec", 55, &limits, &reader));
     STATUS(fdb_sst_reader_verify(reader), FASTDB_CORRUPTION);
     OK(fdb_sst_reader_close(reader));
-#else
-    fdb_encode_u32(image + 40, FASTDB_COMPRESSION_LZ4);
+    fdb_encode_u32(image + 40, UINT32_MAX);
     fdb_encode_u32(image + size - SST_CRC_BYTES, fdb_crc32c(image, size - SST_CRC_BYTES));
     write_at(fd, properties, image, size);
     STATUS(fdb_sst_reader_open(dir, "codec", 55, &limits, &reader), FASTDB_UNSUPPORTED);
-#endif
     OK(fdb_fs_close(fd));
     OK(fdb_dir_unlink(dir, "codec"));
 }
+
+#ifdef FASTDB_HAVE_ZSTD
+static FastDBStatus decode_zstd_fixture(const unsigned char *frame, size_t length)
+{
+    unsigned char encoded[64];
+    unsigned char output[512];
+    CHECK(length <= sizeof(encoded) - SST_BLOCK_HEADER_BYTES);
+    fdb_encode_u32(encoded, SST_ZSTD_BLOCK_MAGIC);
+    fdb_encode_u32(encoded + 4, sizeof(output));
+    fdb_encode_u32(encoded + 8, (uint32_t)length);
+    fdb_encode_u32(encoded + 12, fdb_crc32c(frame, length));
+    memcpy(encoded + SST_BLOCK_HEADER_BYTES, frame, length);
+    size_t scratch, state_bytes, decoded;
+    CHECK(fdb_block_decode_workspace(FASTDB_COMPRESSION_ZSTD, sizeof(output), &scratch,
+                                     &state_bytes));
+    CHECK(scratch == 2 * sizeof(output) && state_bytes != 0);
+    void *state = malloc(state_bytes);
+    CHECK(state != NULL);
+    FastDBStatus status = fdb_block_decode(FASTDB_COMPRESSION_ZSTD, encoded,
+                                           SST_BLOCK_HEADER_BYTES + length, output, sizeof(output),
+                                           state, state_bytes, &decoded);
+    if (status == FASTDB_OK) {
+        CHECK(decoded == sizeof(output));
+        for (size_t i = 0; i < decoded; ++i)
+            CHECK(output[i] == 'R');
+    }
+    free(state);
+    return status;
+}
+
+static void zstd_frame_shape(void)
+{
+    /* Single-segment standard frame with one RLE block and a known size. */
+    const unsigned char frame[] = {0x28, 0xb5, 0x2f, 0xfd, 0x60, 0, 1, 3, 16, 0, 'R'};
+    OK(decode_zstd_fixture(frame, sizeof(frame)));
+    /* Same content size and block with a 128 KiB window descriptor. */
+    const unsigned char oversized_window[] = {0x28, 0xb5, 0x2f, 0xfd, 0x40, 0x38, 0, 1,
+                                               3, 16, 0, 'R'};
+    STATUS(decode_zstd_fixture(oversized_window, sizeof(oversized_window)), FASTDB_CORRUPTION);
+    const unsigned char skippable[] = {0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0};
+    STATUS(decode_zstd_fixture(skippable, sizeof(skippable)), FASTDB_CORRUPTION);
+    unsigned char appended[sizeof(frame) + sizeof(skippable)];
+    memcpy(appended, frame, sizeof(frame));
+    memcpy(appended + sizeof(frame), skippable, sizeof(skippable));
+    STATUS(decode_zstd_fixture(appended, sizeof(appended)), FASTDB_CORRUPTION);
+}
+
+static void zstd_checkpoint_workspace(void)
+{
+    char path[] = "/tmp/fastdb-zstd-checkpoint.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options_with_mode(path, FASTDB_MODE_MEMORY_PERSISTENT,
+                                                     FASTDB_DURABILITY_SYNC);
+    FastDBLimits limits;
+    fastdb_limits_default(&limits);
+    limits.max_key_bytes = 32;
+    limits.max_value_bytes = 128;
+    limits.max_memory_bytes = 2 * 1024 * 1024;
+    OK(fastdb_options_set_limits(options, &limits));
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_ZSTD));
+    FastDB *db;
+    unsigned char payload[128] = {0};
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "k", 1, payload, sizeof(payload)));
+    OK(fastdb_checkpoint(db));
+    OK(fastdb_close(db));
+
+    OK(fastdb_options_set_sstable_compression(options, FASTDB_COMPRESSION_NONE));
+    limits.max_memory_bytes = 48 * 1024;
+    OK(fastdb_options_set_limits(options, &limits));
+    STATUS(fastdb_open(options, &db), FASTDB_LIMIT_EXCEEDED);
+    CHECK(db == NULL);
+    limits.max_memory_bytes = 2 * 1024 * 1024;
+    OK(fastdb_options_set_limits(options, &limits));
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){payload, sizeof(payload)}, 1);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+#endif
 
 int main(void)
 {
@@ -136,7 +224,18 @@ int main(void)
     CHECK(mkdtemp(path) != NULL);
     FDBDirectory dir;
     OK(fdb_dir_lock(path, NULL, &dir));
-    codec_table(&dir);
+    bool lz4 = false;
+    bool zstd = false;
+#ifdef FASTDB_HAVE_LZ4
+    lz4 = true;
+#endif
+#ifdef FASTDB_HAVE_ZSTD
+    zstd = true;
+    zstd_frame_shape();
+    zstd_checkpoint_workspace();
+#endif
+    codec_table(&dir, FASTDB_COMPRESSION_LZ4, SST_LZ4_BLOCK_MAGIC, lz4);
+    codec_table(&dir, FASTDB_COMPRESSION_ZSTD, SST_ZSTD_BLOCK_MAGIC, zstd);
     OK(fdb_dir_close(&dir));
     remove_disk_fixture(path);
 }
