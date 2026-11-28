@@ -2,6 +2,7 @@
 #include "bloom.h"
 #include "crc32c.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,7 +11,13 @@ typedef struct IndexEntry {
     size_t bytes;
     FastDBSlice last_key;
     size_t filter_bytes;
-    FDBBloom bloom;
+    union {
+        FDBBloom bloom;
+        struct {
+            uint64_t offset;
+            atomic_bool corrupt;
+        } streamed;
+    } filter;
 } IndexEntry;
 
 struct FDBSSTReader {
@@ -25,6 +32,7 @@ struct FDBSSTReader {
     IndexEntry *index;
     size_t block_count;
     size_t corrupt_partitions;
+    size_t streamed_filter_bytes;
     uint32_t features;
 };
 
@@ -169,10 +177,33 @@ static FastDBStatus load_properties(FDBSSTReader *reader, const Regions *regions
     return FASTDB_OK;
 }
 
+static FastDBStatus index_streamed_filters(FDBSSTReader *reader, uint64_t offset)
+{
+    /* parse_index already proved that all partition lengths fit before the index. */
+    for (size_t i = 0; i < reader->block_count; ++i) {
+        IndexEntry *entry = &reader->index[i];
+        size_t bytes = entry->filter_bytes;
+        if (bytes > reader->limits.max_filter_bytes)
+            return FASTDB_LIMIT_EXCEEDED;
+        if (bytes > reader->streamed_filter_bytes)
+            reader->streamed_filter_bytes = bytes;
+        entry->filter.streamed.offset = offset;
+        atomic_init(&entry->filter.streamed.corrupt, false);
+        offset += bytes;
+    }
+    return FASTDB_OK;
+}
+
+static bool decode_filter(const IndexEntry *entry, const unsigned char *image, FDBBloom *filter)
+{
+    return fdb_bloom_decode(image, entry->filter_bytes, filter) &&
+           fdb_bloom_may_contain(filter, entry->last_key);
+}
+
 static FastDBStatus load_filters(FDBSSTReader *reader, uint64_t offset, size_t size)
 {
     if (size > reader->limits.max_filter_bytes)
-        return FASTDB_LIMIT_EXCEEDED;
+        return index_streamed_filters(reader, offset);
     if (size == 0) {
         reader->corrupt_partitions = reader->block_count;
         return FASTDB_OK;
@@ -187,9 +218,8 @@ static FastDBStatus load_filters(FDBSSTReader *reader, uint64_t offset, size_t s
     const unsigned char *partition = image;
     for (size_t i = 0; i < reader->block_count; ++i) {
         IndexEntry *entry = &reader->index[i];
-        if (!fdb_bloom_decode(partition, entry->filter_bytes, &entry->bloom) ||
-            !fdb_bloom_may_contain(&entry->bloom, entry->last_key)) {
-            entry->bloom = (FDBBloom){0};
+        if (!decode_filter(entry, partition, &entry->filter.bloom)) {
+            entry->filter.bloom = (FDBBloom){0};
             ++reader->corrupt_partitions;
         }
         partition += entry->filter_bytes;
@@ -323,20 +353,54 @@ void fdb_sst_reader_set_cache(FDBSSTReader *reader, FDBBlockCache *cache)
 
 size_t fdb_sst_reader_corrupt_partitions(const FDBSSTReader *reader)
 {
-    return reader->corrupt_partitions;
+    if (reader->streamed_filter_bytes == 0)
+        return reader->corrupt_partitions;
+    size_t count = 0;
+    for (size_t i = 0; i < reader->block_count; ++i) {
+        if (atomic_load_explicit(&reader->index[i].filter.streamed.corrupt, memory_order_relaxed))
+            ++count;
+    }
+    return count;
 }
 
 FastDBStatus fdb_sst_iter_open(const FDBSSTReader *reader, FDBSSTIterator **out)
 {
     *out = NULL;
     size_t bytes;
-    if (!fdb_add_size(sizeof(FDBSSTIterator), reader->limits.max_block_bytes, &bytes))
+    if (!fdb_add_size(sizeof(FDBSSTIterator), reader->limits.max_block_bytes, &bytes) ||
+        !fdb_add_size(bytes, reader->streamed_filter_bytes, &bytes))
         return FASTDB_LIMIT_EXCEEDED;
     FDBSSTIterator *iter = malloc(bytes);
     if (iter == NULL)
         return FASTDB_OUT_OF_MEMORY;
     *iter = (FDBSSTIterator){.reader = reader};
     *out = iter;
+    return FASTDB_OK;
+}
+
+static FastDBStatus read_filter(FDBSSTIterator *iter, size_t index, FDBBloom *out)
+{
+    const FDBSSTReader *reader = iter->reader;
+    IndexEntry *entry = &reader->index[index];
+    if (reader->streamed_filter_bytes == 0) {
+        *out = entry->filter.bloom;
+        return FASTDB_OK;
+    }
+    *out = (FDBBloom){0};
+    if (atomic_load_explicit(&entry->filter.streamed.corrupt, memory_order_relaxed))
+        return FASTDB_OK;
+
+    unsigned char *image = iter->scratch + reader->limits.max_block_bytes;
+    if (entry->filter_bytes >= FDB_BLOOM_MIN_IMAGE_BYTES) {
+        FastDBStatus status = read_exact(reader, entry->filter.streamed.offset, image,
+                                          entry->filter_bytes);
+        if (status != FASTDB_OK)
+            return status;
+        if (decode_filter(entry, image, out))
+            return FASTDB_OK;
+    }
+    *out = (FDBBloom){0};
+    atomic_store_explicit(&entry->filter.streamed.corrupt, true, memory_order_relaxed);
     return FASTDB_OK;
 }
 
@@ -359,7 +423,8 @@ static FastDBStatus decode_row(const FDBSSTIterator *iter, size_t row, FDBRecord
     return FASTDB_OK;
 }
 
-static FastDBStatus verify_block(const FDBSSTReader *reader, FDBSSTIterator *iter, size_t index)
+static FastDBStatus verify_block(const FDBSSTReader *reader, FDBSSTIterator *iter, size_t index,
+                                  const FDBBloom *bloom)
 {
     if (fdb_decode_u32(iter->offsets) != 0)
         return FASTDB_CORRUPTION;
@@ -374,7 +439,6 @@ static FastDBStatus verify_block(const FDBSSTReader *reader, FDBSSTIterator *ite
         if (order > 0 || (row == 0 && index == 0 && order != 0) ||
             (row != 0 && order == 0 && previous.sequence <= record.sequence))
             return FASTDB_CORRUPTION;
-        const FDBBloom *bloom = &reader->index[index].bloom;
         if (bloom->bits != NULL && !fdb_bloom_may_contain(bloom, record.key))
             return FASTDB_CORRUPTION;
         previous = record;
@@ -383,7 +447,7 @@ static FastDBStatus verify_block(const FDBSSTReader *reader, FDBSSTIterator *ite
            FASTDB_OK : FASTDB_CORRUPTION;
 }
 
-static FastDBStatus load_block(FDBSSTIterator *iter, size_t index)
+static FastDBStatus load_block(FDBSSTIterator *iter, size_t index, const FDBBloom *filter)
 {
     const FDBSSTReader *reader = iter->reader;
     const IndexEntry *entry = &reader->index[index];
@@ -418,7 +482,14 @@ static FastDBStatus load_block(FDBSSTIterator *iter, size_t index)
         return FASTDB_OK;
     if (fdb_decode_u32(block + 12) != fdb_crc32c(block + SST_BLOCK_HEADER_BYTES, body_size))
         return FASTDB_CORRUPTION;
-    FastDBStatus status = verify_block(reader, iter, index);
+    FDBBloom partition;
+    if (filter == NULL) {
+        FastDBStatus status = read_filter(iter, index, &partition);
+        if (status != FASTDB_OK)
+            return status;
+        filter = &partition;
+    }
+    FastDBStatus status = verify_block(reader, iter, index, filter);
     if (status == FASTDB_OK && reader->cache != NULL)
         fdb_block_cache_store(reader->cache, reader->properties.id, entry->offset, block, entry->bytes);
     return status;
@@ -438,7 +509,7 @@ void fdb_sst_iter_first(FDBSSTIterator *iter)
         iter->status = FASTDB_OK;
         return;
     }
-    iter->status = load_block(iter, 0);
+    iter->status = load_block(iter, 0, NULL);
     if (iter->status == FASTDB_OK)
         move_to(iter, 0);
 }
@@ -467,11 +538,11 @@ static bool validate_seek(FDBSSTIterator *iter, FastDBSlice key)
     return iter->status == FASTDB_OK;
 }
 
-static void seek_block(FDBSSTIterator *iter, FastDBSlice key, size_t block)
+static void seek_block(FDBSSTIterator *iter, FastDBSlice key, size_t block, const FDBBloom *filter)
 {
     if (block == iter->reader->block_count)
         return;
-    iter->status = load_block(iter, block);
+    iter->status = load_block(iter, block, filter);
     if (iter->status != FASTDB_OK)
         return;
 
@@ -496,7 +567,7 @@ static void seek_block(FDBSSTIterator *iter, FastDBSlice key, size_t block)
 void fdb_sst_iter_seek(FDBSSTIterator *iter, FastDBSlice key)
 {
     if (validate_seek(iter, key))
-        seek_block(iter, key, block_bound(iter->reader, key));
+        seek_block(iter, key, block_bound(iter->reader, key), NULL);
 }
 
 void fdb_sst_iter_seek_version(FDBSSTIterator *iter, FastDBSlice key, uint64_t sequence)
@@ -506,17 +577,20 @@ void fdb_sst_iter_seek_version(FDBSSTIterator *iter, FastDBSlice key, uint64_t s
     size_t block = block_bound(iter->reader, key);
     if (block == iter->reader->block_count)
         return;
-    const FDBBloom *filter = &iter->reader->index[block].bloom;
-    if (filter->bits != NULL) {
+    FDBBloom filter;
+    iter->status = read_filter(iter, block, &filter);
+    if (iter->status != FASTDB_OK)
+        return;
+    if (filter.bits != NULL) {
         ++iter->bloom_stats.checks;
-        if (!fdb_bloom_may_contain(filter, key)) {
+        if (!fdb_bloom_may_contain(&filter, key)) {
             ++iter->bloom_stats.negatives;
             return;
         }
         ++iter->bloom_stats.positives;
     }
-    seek_block(iter, key, block);
-    if (filter->bits != NULL && iter->valid && fdb_compare(iter->record.key, key) != 0)
+    seek_block(iter, key, block, &filter);
+    if (filter.bits != NULL && iter->valid && fdb_compare(iter->record.key, key) != 0)
         ++iter->bloom_stats.false_positives;
     while (iter->valid && fdb_compare(iter->record.key, key) == 0) {
         if (iter->record.sequence <= sequence)
@@ -545,7 +619,7 @@ void fdb_sst_iter_next(FDBSSTIterator *iter)
     if (next == iter->reader->block_count)
         return;
     uint64_t last_sequence = iter->record.sequence;
-    iter->status = load_block(iter, next);
+    iter->status = load_block(iter, next, NULL);
     if (iter->status != FASTDB_OK)
         return;
     move_to(iter, 0);
@@ -565,7 +639,7 @@ FastDBStatus fdb_sst_iter_status(const FDBSSTIterator *iter)
 void fdb_sst_iter_bloom_stats(const FDBSSTIterator *iter, FDBSSTBloomStats *out)
 {
     *out = iter->bloom_stats;
-    out->corrupt_partitions = iter->reader->corrupt_partitions;
+    out->corrupt_partitions = fdb_sst_reader_corrupt_partitions(iter->reader);
 }
 
 void fdb_sst_iter_close(FDBSSTIterator *iter)

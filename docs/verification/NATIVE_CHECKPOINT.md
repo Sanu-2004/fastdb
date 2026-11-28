@@ -1316,6 +1316,60 @@ fastdb-native:local .`. All six TSan concurrency targets passed five
 executions each with the V062 workaround. The process-kill and injected
 sync cases exercise recovery on the test filesystem.
 
+## P4.4 bounded v1 Bloom reads (V078)
+
+The archived `3572974` GCC Debug baseline passed 29/29. With the new
+reader fixture added to that archive, it returned `FASTDB_LIMIT_EXCEEDED`
+on a table whose four 20-byte Bloom partitions exceeded the 20-byte
+aggregate reader cap. The updated reader holds one partition per iterator
+in that case. The fixture still checks seeks across block boundaries and
+older revisions. It also verifies error propagation and retry on injected
+filter-read failure, and rejects a partition larger than the cap.
+
+A checked table with a damaged partition falls back to its records and
+reports one corrupt partition. The concurrent case shares the reader
+between two iterators and sees the same tombstone and one diagnostic.
+The public LSM fixture reopened an existing table under a 20-byte Bloom
+cap, checked GET and scan results and the tombstone, compacted into four
+bounded v1 outputs, and reopened to verify all values and revision 5 on
+the next write. New writes still use the v1 layout and combined caps.
+
+```sh
+mkdir /tmp/p44-source
+git -c safe.directory=/repo -C /repo archive 3572974 | tar -x -C /tmp/p44-source
+CC=gcc cmake -S /tmp/p44-source -B /tmp/p44-archive -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p44-archive --parallel 6
+ctest --test-dir /tmp/p44-archive --output-on-failure
+cp /repo/tests/native/sstable_reader.c /repo/tests/native/compaction.c /tmp/p44-source/tests/native/
+cmake --build /tmp/p44-archive --target fastdb_sstable_reader fastdb_compaction --parallel 6
+ctest --test-dir /tmp/p44-archive -R '^fastdb_sstable_reader$' --output-on-failure
+
+CC=gcc cmake -S /repo -B /tmp/p44-final-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p44-final-gcc --parallel 6
+ctest --test-dir /tmp/p44-final-gcc -R '^fastdb_sstable_reader$' --repeat until-fail:10 --output-on-failure
+ctest --test-dir /tmp/p44-final-gcc -R '^fastdb_compaction$' --output-on-failure
+ctest --test-dir /tmp/p44-final-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p44-final-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p44-final-clang --parallel 6
+ctest --test-dir /tmp/p44-final-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p44-final-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p44-final-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p44-final-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p44-final-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p44-final-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p44-final-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The final focused reader passed ten executions and the compaction target
+passed 1/1. GCC Debug, Clang Release, ASan/UBSan with leak detection, and
+the Release suite in `docker build -t fastdb-native:local .` each passed
+29/29. Seven concurrency targets passed five TSan executions each using
+the V062 Docker workaround. The first Docker launch was rejected because
+automatic review had reached its usage limit. A later approved launch
+restored Docker verification during the session.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

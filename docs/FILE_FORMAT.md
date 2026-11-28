@@ -125,6 +125,10 @@ timestamps. The hash uses a 64-bit FNV-1a accumulator followed by a
 fixed finalizer and odd double-hash step. Probe count and bits are read
 from the file. A malformed partition is reported in corruption counters
 and bypassed. Lookup continues through the index and actual data blocks.
+The index lengths locate individual v1 partitions even when the combined
+filter region exceeds the read workspace. In that case, the reader
+validates the selected partition before using its bits. Full recovery
+walks the blocks and checks every partition. The v1 byte layout is unchanged.
 
 The properties region starts with two 4-byte key lengths, followed by
 8-byte record and tombstone counts, 8-byte minimum and maximum revisions,

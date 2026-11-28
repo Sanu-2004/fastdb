@@ -4,6 +4,7 @@
 #include "sstable_format.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -235,7 +236,81 @@ static void check_bloom_lookup(const FDBDirectory *dir, const FDBSSTLimits *opti
     OK(fdb_sst_reader_close(reader));
 }
 
-static void test_bloom(const FDBDirectory *dir)
+static void check_damaged_bloom(const FDBDirectory *dir, const FDBSSTLimits *options)
+{
+    FDBSSTReader *reader;
+    FDBSSTIterator *it;
+    OK(fdb_sst_reader_open(dir, "filtered", 42, options, &reader));
+    OK(fdb_sst_reader_verify(reader));
+    CHECK(fdb_sst_reader_corrupt_partitions(reader) == 1);
+    OK(fdb_sst_iter_open(reader, &it));
+    fdb_sst_iter_seek_version(it, (FastDBSlice){"a", 1}, 6);
+    expect(it, "a", 5, FDB_DELETE);
+    FDBSSTBloomStats stats;
+    fdb_sst_iter_bloom_stats(it, &stats);
+    CHECK(stats.corrupt_partitions == 1 && stats.checks == 0);
+    fdb_sst_iter_close(it);
+    OK(fdb_sst_reader_close(reader));
+}
+
+static void streamed_bloom_io(const FDBDirectory *dir, const FDBSSTLimits *options, bool *fail_read)
+{
+    FDBSSTReader *reader;
+    FDBSSTIterator *first, *second;
+    OK(fdb_sst_reader_open(dir, "filtered", 42, options, &reader));
+    OK(fdb_sst_iter_open(reader, &first));
+    OK(fdb_sst_iter_open(reader, &second));
+    fdb_sst_iter_seek_version(first, (FastDBSlice){"a", 1}, 7);
+    expect(first, "a", 7, FDB_PUT);
+    const FDBRecord *held = fdb_sst_iter_current(first);
+    *fail_read = true;
+    fdb_sst_iter_seek_version(second, (FastDBSlice){"b", 1}, 2);
+    STATUS(fdb_sst_iter_status(second), FASTDB_IO_ERROR);
+    CHECK(!*fail_read && fdb_sst_iter_current(second) == NULL);
+    fdb_sst_iter_seek_version(second, (FastDBSlice){"b", 1}, 2);
+    expect(second, "b", 2, FDB_PUT);
+    CHECK(held->sequence == 7 && held->key.size == 1 && memcmp(held->key.data, "a", 1) == 0);
+    fdb_sst_iter_close(second);
+    fdb_sst_iter_close(first);
+    OK(fdb_sst_reader_close(reader));
+}
+
+typedef struct StreamedSeek {
+    FDBSSTReader *reader;
+    pthread_barrier_t start;
+} StreamedSeek;
+
+static void *seek_damaged_partition(void *arg)
+{
+    StreamedSeek *seek = arg;
+    FDBSSTIterator *iter;
+    OK(fdb_sst_iter_open(seek->reader, &iter));
+    int arrival = pthread_barrier_wait(&seek->start);
+    CHECK(arrival == 0 || arrival == PTHREAD_BARRIER_SERIAL_THREAD);
+    for (size_t i = 0; i < 20; ++i) {
+        fdb_sst_iter_seek_version(iter, (FastDBSlice){"a", 1}, 6);
+        expect(iter, "a", 5, FDB_DELETE);
+    }
+    fdb_sst_iter_close(iter);
+    return NULL;
+}
+
+static void concurrent_bloom_fallback(const FDBDirectory *dir, const FDBSSTLimits *options)
+{
+    StreamedSeek seek;
+    OK(fdb_sst_reader_open(dir, "filtered", 42, options, &seek.reader));
+    CHECK(fdb_sst_reader_corrupt_partitions(seek.reader) == 0);
+    CHECK(pthread_barrier_init(&seek.start, NULL, 2) == 0);
+    pthread_t other;
+    CHECK(pthread_create(&other, NULL, seek_damaged_partition, &seek) == 0);
+    seek_damaged_partition(&seek);
+    CHECK(pthread_join(other, NULL) == 0);
+    CHECK(pthread_barrier_destroy(&seek.start) == 0);
+    CHECK(fdb_sst_reader_corrupt_partitions(seek.reader) == 1);
+    OK(fdb_sst_reader_close(seek.reader));
+}
+
+static void test_bloom(const FDBDirectory *dir, bool *fail_read)
 {
     FDBSSTLimits options = limits;
     options.max_filter_bytes = 128;
@@ -243,6 +318,16 @@ static void test_bloom(const FDBDirectory *dir)
     write_table(dir, "filtered", &options);
     options.bloom_bits_per_key = 0;
     check_bloom_lookup(dir, &options);
+    FDBSSTLimits streamed = options;
+    streamed.max_filter_bytes = FDB_BLOOM_MIN_IMAGE_BYTES;
+    check_bloom_lookup(dir, &streamed);
+    streamed_bloom_io(dir, &streamed, fail_read);
+
+    FDBSSTLimits too_small = streamed;
+    --too_small.max_filter_bytes;
+    FDBSSTReader *reader;
+    STATUS(fdb_sst_reader_open(dir, "filtered", 42, &too_small, &reader), FASTDB_LIMIT_EXCEEDED);
+    CHECK(reader == NULL);
 
     int fd;
     OK(fdb_dir_open_file(dir, "filtered", FDB_FILE_READ_WRITE, &fd));
@@ -261,18 +346,9 @@ static void test_bloom(const FDBDirectory *dir)
     CHECK(done == 1);
     OK(fdb_fs_close(fd));
 
-    FDBSSTReader *reader;
-    FDBSSTIterator *it;
-    OK(fdb_sst_reader_open(dir, "filtered", 42, &options, &reader));
-    OK(fdb_sst_reader_verify(reader));
-    OK(fdb_sst_iter_open(reader, &it));
-    fdb_sst_iter_seek_version(it, (FastDBSlice){"a", 1}, 6);
-    expect(it, "a", 5, FDB_DELETE);
-    FDBSSTBloomStats stats;
-    fdb_sst_iter_bloom_stats(it, &stats);
-    CHECK(stats.corrupt_partitions == 1 && stats.checks == 0);
-    fdb_sst_iter_close(it);
-    OK(fdb_sst_reader_close(reader));
+    check_damaged_bloom(dir, &options);
+    check_damaged_bloom(dir, &streamed);
+    concurrent_bloom_fallback(dir, &streamed);
     OK(fdb_dir_unlink(dir, "filtered"));
 }
 
@@ -289,7 +365,7 @@ int main(void)
     damage_block(&dir, false);
     damage_block(&dir, true);
     bloom_no_false_negatives();
-    test_bloom(&dir);
+    test_bloom(&dir, &fail_read);
     OK(fdb_dir_close(&dir));
     char lock_path[sizeof(path) + sizeof("/.fastdb.lock")];
     CHECK(snprintf(lock_path, sizeof(lock_path), "%s/.fastdb.lock", path) > 0);

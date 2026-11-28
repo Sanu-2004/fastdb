@@ -83,6 +83,11 @@ blocks. The catalog still selects the SSTable and supplies the file ID.
 Cache pins hold in-memory block bytes independently of catalog file pins.
 See [ADR 0010](adr/0010-bounded-sstable-block-cache.md).
 
+The v1 reader can stream one Bloom partition per iterator when the full
+filter region exceeds the configured reader budget. The flat sparse index
+still fits in memory. Each streamed partition is checked on use, and the
+recovery walk checks every partition in the referenced tables.
+
 See [concurrency](CONCURRENCY.md) for linearization and ownership,
 [durability](DURABILITY.md) for persistent modes and publication,
 and [ADR 0001](adr/0001-native-memory-tree.md) for the tree and page design.

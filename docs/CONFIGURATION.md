@@ -141,7 +141,7 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 | `max_wal_frame_bytes` | 32 MiB | One atomic WAL frame, including header |
 | `target_block_bytes` | 16 KiB | Target SSTable or checkpoint block size |
 | `max_index_bytes` | 1 MiB | One table's sparse index |
-| `max_filter_bytes` | 256 KiB | One table's combined Bloom partitions |
+| `max_filter_bytes` | 256 KiB | Combined Bloom partitions for new tables and maximum Bloom workspace for readers |
 | `max_catalog_files` | 128 | Files referenced by one catalog |
 | `max_catalog_bytes` | 512 KiB | Encoded catalog |
 | `bloom_bits_per_key` | 10 | Bit budget per record, zero disables writing filters |
@@ -174,6 +174,14 @@ committing. The queue's fixed worker state counts toward engine memory.
 Its byte cap also bounds borrowed caller inputs, which are already owned
 by the caller. The collection delay excludes I/O, lock acquisition, and
 time behind earlier groups. Sync still holds the database mutex.
+
+Readers load a v1 table's Bloom partitions together when the combined
+region fits. If the combined region exceeds `max_filter_bytes` and each
+partition fits, readers use one reusable partition buffer per iterator.
+A partition above the configured cap returns `FASTDB_LIMIT_EXCEEDED`.
+Reducing the cap on reopen can cause extra positional reads. New v1
+tables still apply the cap to their combined filter region, which can
+result in more compaction outputs.
 
 Persistent memory needs five slots during WAL rotation for the directory,
 lock, current WAL, replacement WAL, and temporary manifest. Increase any

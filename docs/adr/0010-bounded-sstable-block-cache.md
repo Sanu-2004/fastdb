@@ -28,3 +28,18 @@ those files. Closing the handle frees the cache after readers have drained.
 The storage contract requires exclusive ownership of published files.
 External modification while a database is open can leave a cached copy
 until eviction. Reopen starts with a cold cache and validates from disk.
+
+## Bounded v1 Bloom reads
+
+V1 index entries already store each Bloom partition's length. After
+checking that the aggregate exactly covers the region before the sparse
+index, the reader can derive partition offsets without loading the bits.
+It keeps the original eager path when the aggregate fits. Otherwise each
+iterator uses a separate buffer sized for the largest admitted partition.
+The same filter workspace reservation covers either path.
+
+A streamed filter is checked before a lookup can use it to skip data. A
+malformed partition is marked once per shared reader and safely bypassed.
+Positional I/O failures propagate. Full recovery walks all records with a
+cold reader and validates every partition. Published files continue to
+use v1 and existing writers retain the combined metadata caps.

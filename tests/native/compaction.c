@@ -1,3 +1,4 @@
+#include "bloom.h"
 #include "disk_fixture.h"
 #include "engine.h"
 #include "manifest.h"
@@ -433,6 +434,56 @@ static void reserve_split_outputs_in_one_edit(void)
     remove_disk_fixture(path);
 }
 
+static void compact_with_one_filter_buffer(void)
+{
+    char path[] = "/tmp/fastdb-streamed-bloom.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    const unsigned char payload[96] = {7, 0, 9};
+    const char keys[] = {'a', 'b', 'c'};
+    for (size_t i = 0; i < sizeof(keys); ++i)
+        OK(fastdb_put(db, &keys[i], 1, payload, sizeof(payload)));
+    OK(fastdb_delete(db, "z", 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){1, 0}, 2);
+
+    FastDBPersistentOptions storage = options->storage;
+    storage.max_filter_bytes = FDB_BLOOM_MIN_IMAGE_BYTES;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    OK(fastdb_open(options, &db));
+    for (size_t i = 0; i < sizeof(keys); ++i)
+        expect_value(db, (FastDBSlice){&keys[i], 1}, (FastDBSlice){payload, sizeof(payload)}, i + 1);
+    expect_missing(db, (FastDBSlice){"z", 1});
+    FastDBIterator *page;
+    OK(fastdb_scan_prefix(db, (FastDBSlice){0}, 4, &page));
+    for (size_t i = 0; i < sizeof(keys); ++i) {
+        FastDBSlice key, value;
+        uint64_t revision;
+        OK(fastdb_iterator_next(page, &key, &value, &revision));
+        CHECK(key.size == 1 && memcmp(key.data, &keys[i], 1) == 0 &&
+              value.size == sizeof(payload) && memcmp(value.data, payload, sizeof(payload)) == 0 &&
+              revision == i + 1);
+    }
+    CHECK(!fastdb_iterator_has_more(page));
+    fastdb_iterator_close(page);
+    OK(fastdb_compact(db));
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 4}, 2);
+
+    OK(fastdb_open(options, &db));
+    for (size_t i = 0; i < sizeof(keys); ++i)
+        expect_value(db, (FastDBSlice){&keys[i], 1}, (FastDBSlice){payload, sizeof(payload)}, i + 1);
+    expect_missing(db, (FastDBSlice){"z", 1});
+    OK(fastdb_put(db, "z", 1, NULL, 0));
+    expect_value(db, (FastDBSlice){"z", 1}, (FastDBSlice){0}, 5);
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     reclaim_shadowed_versions();
@@ -444,4 +495,5 @@ int main(void)
     auto_cascade_and_disable();
     workspace_limit();
     reserve_split_outputs_in_one_edit();
+    compact_with_one_filter_buffer();
 }
