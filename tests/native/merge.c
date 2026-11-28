@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static const FDBSSTLimits limits = {12, 128, 64, 256, 1024, 256, 10};
+static const FDBSSTLimits limits = {12, 128, 64, 256, 1024, 256, 10, false};
 
 static const FDBRecord older[] = {
     {{"a\0", 2}, {"old", 3}, 9, 100, FDB_PUT},

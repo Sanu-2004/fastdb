@@ -20,12 +20,20 @@ struct FDBSSTWriter {
     unsigned char *index;
     size_t index_bytes;
     uint32_t block_count;
+    unsigned char *directory;
+    size_t directory_bytes;
+    uint32_t leaf_count;
     unsigned char *filters;
     size_t filter_bytes;
     size_t pending_filter_bytes;
     unsigned char *min_key;
     unsigned char *max_key;
 };
+
+static size_t leaf_capacity(const FDBSSTLimits *limits)
+{
+    return limits->partitioned ? limits->max_index_bytes / 2 : limits->max_index_bytes;
+}
 
 bool fdb_sst_valid_limits(const FDBSSTLimits *limits)
 {
@@ -34,8 +42,7 @@ bool fdb_sst_valid_limits(const FDBSSTLimits *limits)
            limits->target_block_bytes >= SST_BLOCK_HEADER_BYTES + SST_MIN_ROW_BYTES &&
            limits->target_block_bytes <= limits->max_block_bytes &&
            limits->max_block_bytes <= UINT32_MAX &&
-           limits->max_index_bytes >= SST_INDEX_HEADER_BYTES + SST_INDEX_ENTRY_BYTES + 1 +
-                                      SST_CRC_BYTES &&
+           leaf_capacity(limits) >= SST_INDEX_HEADER_BYTES + SST_MIN_INDEX_ENTRY_BYTES + SST_CRC_BYTES &&
            limits->max_index_bytes <= UINT32_MAX && limits->max_filter_bytes <= UINT32_MAX &&
            limits->bloom_bits_per_key <= FDB_BLOOM_MAX_BITS_PER_KEY &&
            (limits->bloom_bits_per_key == 0 ||
@@ -57,9 +64,28 @@ bool fdb_sst_writer_budget(const FDBSSTLimits *limits, size_t *bytes)
 
 bool fdb_sst_tree_fits(const FDBSSTLimits *limits, size_t keys, size_t key_bytes)
 {
-    size_t available = limits->max_index_bytes - SST_INDEX_HEADER_BYTES - SST_CRC_BYTES;
+    if (keys == 0)
+        return key_bytes == 0;
+    size_t capacity = leaf_capacity(limits);
+    size_t available = capacity - SST_INDEX_HEADER_BYTES - SST_CRC_BYTES;
     bool bloom = limits->bloom_bits_per_key != 0;
     size_t overhead = SST_INDEX_ENTRY_BYTES + (bloom ? sizeof(uint32_t) : 0);
+    if (limits->partitioned) {
+        size_t max_key = key_bytes < limits->max_key_bytes ? key_bytes : limits->max_key_bytes;
+        size_t entry;
+        if (max_key == 0 || !fdb_add_size(overhead, max_key, &entry))
+            return false;
+        size_t per_leaf = available / entry;
+        size_t filter_rows = limits->max_filter_bytes / FDB_BLOOM_MIN_IMAGE_BYTES;
+        if (bloom && filter_rows < per_leaf)
+            per_leaf = filter_rows;
+        if (per_leaf == 0)
+            return false;
+        size_t leaves = 1 + (keys - 1) / per_leaf;
+        size_t root_keys = leaves <= key_bytes / max_key ? leaves * max_key : key_bytes;
+        size_t root_room = limits->max_index_bytes - capacity - SST_INDEX_HEADER_BYTES - SST_CRC_BYTES;
+        return root_keys <= root_room && leaves <= (root_room - root_keys) / SST_INDEX_ENTRY_BYTES;
+    }
     /* One index entry and one minimal Bloom partition per row is the worst case. */
     return key_bytes <= available && keys <= (available - key_bytes) / overhead &&
            (!bloom || keys <= limits->max_filter_bytes / FDB_BLOOM_MIN_IMAGE_BYTES);
@@ -90,6 +116,7 @@ FastDBStatus fdb_sst_writer_destroy(FDBSSTWriter *writer)
     free(writer->block);
     free(writer->row_offsets);
     free(writer->index);
+    free(writer->directory);
     free(writer->filters);
     free(writer->min_key);
     free(writer->max_key);
@@ -102,12 +129,16 @@ static bool allocate_buffers(FDBSSTWriter *writer)
     size_t row_capacity = writer->limits.max_block_bytes / SST_MIN_ROW_BYTES;
     writer->row_offsets = malloc(row_capacity * sizeof(*writer->row_offsets));
     writer->block = malloc(writer->limits.max_block_bytes);
-    writer->index = malloc(writer->limits.max_index_bytes);
+    size_t capacity = leaf_capacity(&writer->limits);
+    writer->index = malloc(capacity);
+    if (writer->limits.partitioned)
+        writer->directory = malloc(writer->limits.max_index_bytes - capacity);
     if (writer->limits.bloom_bits_per_key != 0)
         writer->filters = malloc(writer->limits.max_filter_bytes);
     writer->min_key = malloc(writer->limits.max_key_bytes);
     writer->max_key = malloc(writer->limits.max_key_bytes);
     return writer->row_offsets != NULL && writer->block != NULL && writer->index != NULL &&
+           (!writer->limits.partitioned || writer->directory != NULL) &&
            (writer->limits.bloom_bits_per_key == 0 || writer->filters != NULL) &&
            writer->min_key != NULL && writer->max_key != NULL;
 }
@@ -127,6 +158,7 @@ FastDBStatus fdb_sst_writer_open(const FDBDirectory *dir, const char *temporary_
     writer->properties.id = id;
     writer->properties.min_sequence = UINT64_MAX;
     writer->index_bytes = SST_INDEX_HEADER_BYTES;
+    writer->directory_bytes = SST_INDEX_HEADER_BYTES;
     if (!allocate_buffers(writer)) {
         (void)fdb_sst_writer_destroy(writer);
         return FASTDB_OUT_OF_MEMORY;
@@ -135,7 +167,7 @@ FastDBStatus fdb_sst_writer_open(const FDBDirectory *dir, const char *temporary_
     if (status == FASTDB_OK) {
         unsigned char header[SST_HEADER_BYTES] = {0};
         memcpy(header, SST_MAGIC, 8);
-        fdb_encode_u32(header + 8, SST_VERSION);
+        fdb_encode_u32(header + 8, limits->partitioned ? SST_PARTITIONED_VERSION : SST_VERSION);
         if (writer->filters != NULL)
             fdb_encode_u32(header + 12, SST_FEATURE_BLOOM);
         fdb_encode_u64(header + 16, id);
@@ -174,6 +206,11 @@ uint64_t fdb_sst_writer_file_bytes(const FDBSSTWriter *writer)
                     writer->properties.max_key.size;
         if (writer->filters != NULL)
             buffered += sizeof(uint32_t) + (uint64_t)writer->pending_filter_bytes;
+    }
+    if (writer->directory != NULL) {
+        buffered += writer->directory_bytes + (uint64_t)SST_CRC_BYTES;
+        if (writer->block_count != 0 || writer->row_count != 0)
+            buffered += SST_INDEX_ENTRY_BYTES + (uint64_t)writer->properties.max_key.size;
     }
     return writer->offset + buffered;
 }
@@ -228,6 +265,38 @@ static FastDBStatus flush_block(FDBSSTWriter *writer)
     return FASTDB_OK;
 }
 
+static FastDBStatus append_index(FDBSSTWriter *writer, unsigned char *image, size_t used,
+                                   uint32_t entries)
+{
+    fdb_encode_u32(image, entries);
+    fdb_encode_u32(image + used, fdb_crc32c(image, used));
+    return append_bytes(writer, image, used + SST_CRC_BYTES);
+}
+
+static FastDBStatus finish_leaf(FDBSSTWriter *writer)
+{
+    FastDBStatus status = flush_block(writer);
+    if (status == FASTDB_OK && writer->filter_bytes != 0)
+        status = append_bytes(writer, writer->filters, writer->filter_bytes);
+    uint64_t index_offset = writer->offset;
+    if (status == FASTDB_OK)
+        status = append_index(writer, writer->index, writer->index_bytes, writer->block_count);
+    if (status == FASTDB_OK && writer->directory != NULL) {
+        unsigned char *entry = writer->directory + writer->directory_bytes;
+        FastDBSlice last = writer->properties.max_key;
+        fdb_encode_u64(entry, index_offset);
+        fdb_encode_u32(entry + 8, (uint32_t)(writer->index_bytes + SST_CRC_BYTES));
+        fdb_encode_u32(entry + 12, (uint32_t)last.size);
+        memcpy(entry + SST_INDEX_ENTRY_BYTES, last.data, last.size);
+        writer->directory_bytes += SST_INDEX_ENTRY_BYTES + last.size;
+        ++writer->leaf_count;
+        writer->index_bytes = SST_INDEX_HEADER_BYTES;
+        writer->block_count = 0;
+        writer->filter_bytes = 0;
+    }
+    return status;
+}
+
 static bool room_for_row(const FDBSSTWriter *writer, size_t incoming, bool flush,
                           size_t *filter_size)
 {
@@ -241,7 +310,7 @@ static bool room_for_row(const FDBSSTWriter *writer, size_t incoming, bool flush
             *filter_size > available || (flush && writer->pending_filter_bytes > available - *filter_size))
             return false;
     }
-    size_t spare = writer->limits.max_index_bytes - writer->index_bytes - SST_CRC_BYTES;
+    size_t spare = leaf_capacity(&writer->limits) - writer->index_bytes - SST_CRC_BYTES;
     size_t required;
     if (!fdb_add_size(entry_overhead, incoming, &required) || required > spare)
         return false;
@@ -249,6 +318,36 @@ static bool room_for_row(const FDBSSTWriter *writer, size_t incoming, bool flush
         return true;
     spare -= required;
     return spare >= entry_overhead && writer->properties.max_key.size <= spare - entry_overhead;
+}
+
+static FastDBStatus admit_row(FDBSSTWriter *writer, size_t key_size, bool flush, size_t *filter_size)
+{
+    bool fits = room_for_row(writer, key_size, flush, filter_size);
+    if (writer->directory == NULL)
+        return fits ? FASTDB_OK : FASTDB_LIMIT_EXCEEDED;
+    size_t leaf = leaf_capacity(&writer->limits);
+    size_t root_room = writer->limits.max_index_bytes - leaf - writer->directory_bytes - SST_CRC_BYTES;
+    if (root_room < SST_INDEX_ENTRY_BYTES || key_size > root_room - SST_INDEX_ENTRY_BYTES)
+        return FASTDB_LIMIT_EXCEEDED;
+    if (fits)
+        return FASTDB_OK;
+
+    /* Leave space for both the old leaf's last key and the new leaf's bound. */
+    root_room -= SST_INDEX_ENTRY_BYTES + key_size;
+    size_t fresh = leaf - SST_INDEX_HEADER_BYTES - SST_CRC_BYTES - SST_INDEX_ENTRY_BYTES;
+    if (writer->filters != NULL) {
+        if (fresh < sizeof(uint32_t))
+            return FASTDB_LIMIT_EXCEEDED;
+        fresh -= sizeof(uint32_t);
+    }
+    if ((writer->block_count == 0 && writer->row_count == 0) || key_size > fresh ||
+        root_room < SST_INDEX_ENTRY_BYTES ||
+        writer->properties.max_key.size > root_room - SST_INDEX_ENTRY_BYTES)
+        return FASTDB_LIMIT_EXCEEDED;
+    FastDBStatus status = finish_leaf(writer);
+    if (status != FASTDB_OK)
+        return status;
+    return room_for_row(writer, key_size, false, filter_size) ? FASTDB_OK : FASTDB_LIMIT_EXCEEDED;
 }
 
 static void update_properties(FDBSSTWriter *writer, const FDBRecord *record)
@@ -297,8 +396,9 @@ FastDBStatus fdb_sst_writer_add(FDBSSTWriter *writer, const FDBRecord *record)
     size_t target = writer->limits.target_block_bytes;
     bool flush = writer->row_count != 0 && (used > target || row_size > target - used);
     size_t filter_size;
-    if (!room_for_row(writer, record->key.size, flush, &filter_size))
-        return FASTDB_LIMIT_EXCEEDED;
+    status = admit_row(writer, record->key.size, flush, &filter_size);
+    if (status != FASTDB_OK)
+        return status;
     if (flush) {
         status = flush_block(writer);
         if (status != FASTDB_OK)
@@ -339,20 +439,24 @@ static size_t write_properties(unsigned char *bytes, const FDBSSTProperties *pro
 
 static FastDBStatus finish_image(FDBSSTWriter *writer, unsigned char *properties)
 {
-    FastDBStatus status = flush_block(writer);
-    if (status != FASTDB_OK)
-        return status;
-    if (writer->filter_bytes != 0) {
-        status = append_bytes(writer, writer->filters, writer->filter_bytes);
+    FastDBStatus status = FASTDB_OK;
+    uint64_t index_offset;
+    size_t index_size;
+    if (writer->directory != NULL) {
+        if (writer->row_count != 0 || writer->block_count != 0)
+            status = finish_leaf(writer);
         if (status != FASTDB_OK)
             return status;
+        index_offset = writer->offset;
+        index_size = writer->directory_bytes + SST_CRC_BYTES;
+        status = append_index(writer, writer->directory, writer->directory_bytes, writer->leaf_count);
+    } else {
+        status = finish_leaf(writer);
+        if (status != FASTDB_OK)
+            return status;
+        index_size = writer->index_bytes + SST_CRC_BYTES;
+        index_offset = writer->offset - index_size;
     }
-    uint64_t index_offset = writer->offset;
-    fdb_encode_u32(writer->index, writer->block_count);
-    fdb_encode_u32(writer->index + writer->index_bytes, fdb_crc32c(writer->index,
-                                                                  writer->index_bytes));
-    size_t index_size = writer->index_bytes + SST_CRC_BYTES;
-    status = append_bytes(writer, writer->index, index_size);
     if (status != FASTDB_OK)
         return status;
     uint64_t properties_offset = writer->offset;
@@ -362,7 +466,7 @@ static FastDBStatus finish_image(FDBSSTWriter *writer, unsigned char *properties
         return status;
 
     unsigned char footer[SST_FOOTER_BYTES] = {0};
-    memcpy(footer, SST_FOOTER_MAGIC, 8);
+    memcpy(footer, writer->directory == NULL ? SST_FOOTER_MAGIC : SST_PARTITIONED_FOOTER_MAGIC, 8);
     fdb_encode_u64(footer + 8, index_offset);
     fdb_encode_u64(footer + 16, index_size);
     fdb_encode_u64(footer + 24, properties_offset);

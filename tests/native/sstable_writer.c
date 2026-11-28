@@ -1,4 +1,5 @@
 #include "check.h"
+#include "bloom.h"
 #include "crc32c.h"
 #include "sstable_format.h"
 
@@ -6,7 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static const FDBSSTLimits limits = {20, 100, 80, 160, 256, 0, 0};
+static const FDBSSTLimits limits = {20, 100, 80, 160, 256, 0, 0, false};
 
 static FDBFsFault inject(void *context, FDBFsOp operation, size_t requested)
 {
@@ -146,6 +147,31 @@ static void limits_and_failure(const FDBDirectory *dir, bool *fail_sync)
     OK(fdb_dir_unlink(dir, "interrupted.tmp"));
 }
 
+static void partition_directory_limit(const FDBDirectory *dir)
+{
+    FDBSSTLimits small = limits;
+    small.partitioned = true;
+    small.max_index_bytes = 88;
+    small.bloom_bits_per_key = 10;
+    small.max_filter_bytes = FDB_BLOOM_MIN_IMAGE_BYTES;
+    const unsigned char value[80] = {7};
+    FDBSSTWriter *writer;
+    OK(fdb_sst_writer_open(dir, "directory-limit.tmp", 13, &small, &writer));
+    for (char key = 'a'; key <= 'c'; ++key) {
+        FDBRecord record = {{&key, 1}, {value, sizeof(value)}, (uint64_t)(key - 'a' + 1), 0, FDB_PUT};
+        STATUS(fdb_sst_writer_add(writer, &record), key == 'c' ? FASTDB_LIMIT_EXCEEDED : FASTDB_OK);
+    }
+    FDBSSTProperties properties;
+    OK(fdb_sst_writer_finish(writer, &properties));
+    CHECK(properties.records == 2 && properties.max_sequence == 2);
+    OK(fdb_sst_writer_destroy(writer));
+    FDBSSTReader *reader;
+    OK(fdb_sst_reader_open(dir, "directory-limit.tmp", 13, &small, &reader));
+    OK(fdb_sst_reader_verify(reader));
+    OK(fdb_sst_reader_close(reader));
+    OK(fdb_dir_unlink(dir, "directory-limit.tmp"));
+}
+
 int main(void)
 {
     char path[] = "/tmp/fastdb-sst.XXXXXXXX";
@@ -156,6 +182,7 @@ int main(void)
     OK(fdb_dir_lock(path, &fs, &dir));
     writer_image(&dir);
     limits_and_failure(&dir, &fail_sync);
+    partition_directory_limit(&dir);
     OK(fdb_dir_close(&dir));
     char lock_path[sizeof(path) + sizeof("/.fastdb.lock")];
     CHECK(snprintf(lock_path, sizeof(lock_path), "%s/.fastdb.lock", path) > 0);

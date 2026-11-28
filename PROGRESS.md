@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-28\
-**Last verified base commit / branch:** `3572974` / `main`. V078 verifies bounded v1 Bloom reads in P4.4.
+**Last verified base commit / branch:** `f1e3b7e` / `main`. V079 completes P4.4.
 **Current milestone:** P4 — performance and configuration hardening.\
-**Next task:** P4.4 — partitioned SSTable indexes and filters.
+**Next task:** P4.5 — optional SSTable block compression.
 
 ## 1. How to use this file
 
@@ -115,7 +115,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P4.1 | Optional arena allocator with real allocation accounting, bounded history and safe lifetime. | DONE | V074 verifies the opt-in LSM arena, charged chunk capacity, allocation and admission rollback, snapshot lifetime, arena retention across a failed frozen flush, and two-WAL recovery after SIGKILL. Full profiles passed 26/26 each and TSan passed 20 executions. |
 | P4.2 | Thread-safe bounded LRU block cache, file ID/offset keys, pinned-block lifetime, metrics. | DONE | V075 verifies the opt-in per-database cache, byte cap, LRU eviction, iterator pins, fault bypass, corruption rejection, file-ID isolation through compaction, concurrent hits and stats. See [ADR 0010](docs/adr/0010-bounded-sstable-block-cache.md). |
 | P4.3 | Group commit and interval sync worker; durable ACK ordering and sync-failure tests. | DONE | V076 verifies interval sync. V077 verifies one group sync for concurrent PUT/CAS/batch in both persistent modes, no early acknowledgement or live visibility, bounded count and bytes, rotation, failure outcomes, expiry purge and process-kill recovery. |
-| P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | IN_PROGRESS | V078 verifies one-partition Bloom reads from existing v1 files, corrupt-filter fallback, and public reopen/compaction with a smaller filter cap. Bounded writer partitions and hierarchical sparse index lookup remain open. |
+| P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | DONE | V078 verifies bounded v1 Bloom reads. V079 verifies v2 writer limits, root and leaf checks, a table above 2 MiB under 64 KiB reader workspace, revisions crossing leaves, and mixed v1/v2 compaction and reopen. [ADR 0011](docs/adr/0011-partitioned-sstable-indexes.md). |
 | P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | TODO | — |
 | P4.6 | Size-tiered compaction and validated storage profiles; consistent search semantics across overlapping runs. | TODO | — |
 | P4.7 | Native stats/metrics and benchmark harness; repeatable baseline measurements before optimization. | TODO | — |
@@ -199,13 +199,13 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G01 | Reproducible GCC + Clang build, C API/CLI and warnings check | PASS | V023, V041 |
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021. V074 revalidates the 512-byte memory fixture after adding the LSM allocator. |
 | G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021. V076–V077 revalidate WAL reopen and revisions with interval and group commit. |
-| G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021 and V075. V078 verifies v1 streamed Bloom reads, corruption fallback, and positional error propagation. Hierarchical indexes remain in P4.4. |
+| G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021, V075, and V078–V079. V079 adds root/leaf corruption checks, Bloom fallback, and mixed-format integration. |
 | G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | PASS | V067–V068 cover complete batches, CAS, memory and LSM snapshots, merged scans and concurrent snapshot/maintenance fixtures. Release stress remains in G08/G09. |
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | V073 covers a deterministic multilevel merge larger than the engine budget. P8.3 tracks release-scale concurrent stress, RSS and FD measurements. |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V078 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V079 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -301,6 +301,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V076 | 2026-11-27 / P4.3 interval sync based on `7d84d05` | GCC Debug test-first build, focused interval repeats, WAL/set and LSM fault tests, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Test-first build found the missing policy. Verified default and custom deadlines, acknowledgement before the worker sync, `COMMIT_UNCERTAIN` propagation, pending sync during close, and rotation before the worker ticks. Final interval test passed 10 executions, each full profile passed 28/28 and TSan passed 25 executions. |
 | V077 | 2026-11-27 / P4.3 group commit based on `2836a4c` | GCC Debug baseline/test-first build, focused group/interval/TTL targets, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 28/28. Corrected fixture include path and moved its sync gate past startup directory sync. Group success, uncertain outcomes, caps, WAL rotation, acknowledged SIGKILL recovery and purge sync passed. Group target passed 10 executions, all full profiles passed 29/29 each, and TSan passed 30 executions. |
 | V078 | 2026-11-28 / P4.4 streamed Bloom reads based on `3572974` | Archived GCC Debug baseline and failing reader regression, focused reader/compaction, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 29/29. Original reader rejected 80 bytes of filters under a 20-byte cap. The updated reader streams 20-byte partitions, bypasses reported corruption, and preserves I/O errors. Public reopen, scan, compaction into four outputs and reinsertion passed. Full profiles passed 29/29 each, focused reader passed 10 runs, and TSan passed 35 executions. |
+| V079 | 2026-11-28 / P4.4 partitioned SSTables based on `f1e3b7e` | GCC Debug baseline, test-first build, focused writer/reader/compaction, repeated reader, full GCC/Clang/ASan/UBSan/LSan/Docker and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 29/29. New test failed to compile before partitioned writing. The final cases pass directory saturation, corrupt directory/leaf/filter handling, a 2,048-row table over 2 MiB under 64 KiB reader workspace, and mixed v1/v2 reopen/compaction. Full profiles 29/29 and TSan 35 executions. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -618,14 +619,20 @@ These are deliberate boundaries, not completed features:
 - Reused the v1 sparse-index partition lengths to locate Bloom filters in `src/storage/sstable_reader.c`. Readers keep one iterator-local buffer when the complete region exceeds the read budget. Failed I/O propagates and malformed filters are marked once per reader. Checked recovery, point/range reads, concurrent fallback, and compaction with the lower cap without changing the byte layout.
 - V078 passed the focused reader and compaction tests, all four 29-test full profiles, and 35 TSan concurrency executions. P4.4 remains IN_PROGRESS for partitioned construction and hierarchical sparse indexes.
 
+### Session 032 — 2026-11-28 — Complete P4.4 partitioned SSTables
+
+- Started from pushed `f1e3b7e` and confirmed the 29-test baseline. Added the cross-leaf and mixed-format fixtures first. The test build stopped on the missing partitioned writer option.
+- Added an opt-in v2 writer and version-selected reader. The current leaf and directory share the index budget. Each iterator loads one leaf and preserves version ordering across leaf boundaries. Capped admission, corruption diagnostics and v1 compatibility passed. See ADR 0011.
+- V079 passed 29/29 in the full GCC Debug, Clang Release, ASan/UBSan with leak detection, and Docker Release profiles. TSan passed 35 executions. P4.4 is DONE. Prepared a disposable Docker toolchain with Debian `liblz4-dev` 1.9.4-1 for P4.5.
+
 ## 9. Current handoff
 
 - **Current milestone:** P4 — performance and configuration hardening.
-- **Next task ID:** P4.4.
-- **Next action:** Implement bounded writer partitions and a hierarchical sparse index while retaining v1 reads.
-- **Next commands:** In `tests/native/sstable_writer.c`, add a fixture that must write one SSTable whose total index and filter metadata exceed a working partition. Start the versioned writer path at `room_for_row`, `flush_block`, and `finish_image`. Spill a checked leaf index and its filters once full and record its offset, length and last key in a bounded directory. Extend `parse_index`, `block_bound`, and iteration to load one leaf and use lower-bound routing when the same key spans leaves. Reject invalid offsets and checksums, retain `V078` v1 reads, and account for directory and leaf buffers in merge admission. Verify mixed-format compaction and recovery, then run the V078 matrix.
-- **Last verified good checkpoint:** V078 bounded v1 Bloom reads based on `3572974`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the failing archived run and final passes.
-- **Working-tree state:** V078 includes streamed Bloom reader, tests and documentation. Confirm with `git status --short --branch`.
+- **Next task ID:** P4.5.
+- **Next action:** Add optional LZ4 SSTable block compression with per-file codec identification and bounded decoding.
+- **Next commands:** Add compressible and raw-fallback block tests, corrupt length/checksum cases, and mixed compressed/uncompressed compaction before changing `flush_block`, `load_block`, and `load_properties`. Verify workspace and cache charges with both builds, reader compatibility with v1/v2, and explicit unsupported status in a codec-disabled build. Use `fastdb-local-toolchain:lz4` for the enabled build and run the V079 matrix.
+- **Last verified good checkpoint:** V079 partitioned SSTables based on `f1e3b7e`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records focused and full passes.
+- **Working-tree state:** V079 includes the v2 writer, reader, tests, API and format documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, power-loss tests and release-scale verification remain open.
 

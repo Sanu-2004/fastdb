@@ -88,6 +88,12 @@ filter region exceeds the configured reader budget. The flat sparse index
 still fits in memory. Each streamed partition is checked on use, and the
 recovery walk checks every partition in the referenced tables.
 
+The optional v2 writer alternates data with checksummed leaf indexes
+and filters. Each reader loads one shared root directory. An iterator
+loads and reuses one leaf's metadata and one data buffer. Compaction uses
+the same bounded table interfaces for mixed v1 and v2 inputs. See
+[the format specification](FILE_FORMAT.md) for layout and version rules.
+
 See [concurrency](CONCURRENCY.md) for linearization and ownership,
 [durability](DURABILITY.md) for persistent modes and publication,
 and [ADR 0001](adr/0001-native-memory-tree.md) for the tree and page design.

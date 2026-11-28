@@ -140,8 +140,8 @@ in the other persistent mode returns `FASTDB_UNSUPPORTED`.
 | `max_wal_segment_bytes` | 64 MiB | One WAL segment, including header |
 | `max_wal_frame_bytes` | 32 MiB | One atomic WAL frame, including header |
 | `target_block_bytes` | 16 KiB | Target SSTable or checkpoint block size |
-| `max_index_bytes` | 1 MiB | One table's sparse index |
-| `max_filter_bytes` | 256 KiB | Combined Bloom partitions for new tables and maximum Bloom workspace for readers |
+| `max_index_bytes` | 1 MiB | Flat v1 sparse index, or v2 directory and one index leaf |
+| `max_filter_bytes` | 256 KiB | v1 output filter region, v2 output filter region per leaf, and reader Bloom workspace |
 | `max_catalog_files` | 128 | Files referenced by one catalog |
 | `max_catalog_bytes` | 512 KiB | Encoded catalog |
 | `bloom_bits_per_key` | 10 | Bit budget per record, zero disables writing filters |
@@ -182,6 +182,21 @@ A partition above the configured cap returns `FASTDB_LIMIT_EXCEEDED`.
 Reducing the cap on reopen can cause extra positional reads. New v1
 tables still apply the cap to their combined filter region, which can
 result in more compaction outputs.
+
+`fastdb_options_set_partitioned_sstables(options, true)` selects v2 for
+new flushes, checkpoints, and compaction outputs in either persistent
+mode. The default writer uses v1. Reads select v1 or v2 from each file.
+Changes apply on reopen. Flush or checkpoint before switching back to
+v1 if the active WAL contains a tree that needs v2's metadata capacity.
+Older FastDB builds require a version upgrade to open a database with
+v2 tables.
+
+The v2 writer divides `max_index_bytes` between the root directory and
+its active leaf, and applies `max_filter_bytes` to each leaf. The reader
+admits the root and its largest leaf together. A root at capacity stops
+the table at a key boundary during compaction. A key group that cannot
+fit in one table returns `FASTDB_LIMIT_EXCEEDED`. Memtable admission uses
+conservative leaf and directory bounds so flush and replay have room.
 
 Persistent memory needs five slots during WAL rotation for the directory,
 lock, current WAL, replacement WAL, and temporary manifest. Increase any

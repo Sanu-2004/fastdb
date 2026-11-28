@@ -13,6 +13,7 @@ typedef struct FDBSSTLimits {
     size_t max_index_bytes;
     size_t max_filter_bytes;
     unsigned int bloom_bits_per_key;
+    bool partitioned;
 } FDBSSTLimits;
 
 typedef struct FDBSSTProperties {
@@ -61,9 +62,9 @@ FastDBStatus fdb_sst_reader_open(const FDBDirectory *dir, const char *name, uint
 void fdb_sst_reader_set_cache(FDBSSTReader *reader, FDBBlockCache *cache);
 const FDBSSTProperties *fdb_sst_reader_properties(const FDBSSTReader *reader);
 size_t fdb_sst_reader_corrupt_partitions(const FDBSSTReader *reader);
-FastDBStatus fdb_sst_reader_verify(const FDBSSTReader *reader);
+FastDBStatus fdb_sst_reader_verify(FDBSSTReader *reader);
 typedef FastDBStatus (*FDBSSTVisit)(void *context, const FDBRecord *record);
-FastDBStatus fdb_sst_reader_walk(const FDBSSTReader *reader, FDBSSTVisit visit, void *context);
+FastDBStatus fdb_sst_reader_walk(FDBSSTReader *reader, FDBSSTVisit visit, void *context);
 /* All iterators must close before their reader is released. */
 FastDBStatus fdb_sst_reader_close(FDBSSTReader *reader);
 

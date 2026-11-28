@@ -148,3 +148,24 @@ key. An empty checkpoint has no data blocks or Bloom partitions, a zero
 index count, zero key lengths, and zero record, tombstone, and revision
 properties. The manifest supplies its covered revision. LSM inputs remain
 nonempty.
+
+### Partitioned SSTable v2
+
+V2 uses version 2 in the existing header and `FDBSSTF2` in the footer.
+Properties, data blocks, per-block Bloom images, and the encoding of a
+sparse index leaf are the same as v1. The data area repeats one or more
+leaves, each laid out as contiguous data blocks, their Bloom images if
+enabled, and a checksummed leaf index. The footer's index region points
+to the root directory after the last leaf. An empty checkpoint has a
+zero-entry root immediately after the header.
+
+The directory begins with a four-byte entry count. Each entry contains
+an eight-byte leaf-index offset, a four-byte leaf-index length, a
+four-byte key length, and the leaf's last key. A CRC32C covers the count
+and entries. The first leaf's data starts after the table header. Each
+later leaf's data starts after the preceding leaf index. The final leaf
+ends at the root directory. The reader checks region bounds and exact
+coverage, then verifies each leaf before using its block offsets and
+Bloom filters. The root and leaves order their last keys in
+nondecreasing unsigned byte order. Lower-bound searches and sequential
+advance preserve older revisions across leaf boundaries.

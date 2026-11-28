@@ -116,6 +116,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     disk->table = (FDBSSTLimits){
         limits->max_key_bytes, limits->max_value_bytes, storage->target_block_bytes, block,
         storage->max_index_bytes, storage->max_filter_bytes, storage->bloom_bits_per_key,
+        options->partitioned_sstables,
     };
     disk->compaction = options->compaction;
     disk->policy = (FDBCompactionPolicy){
@@ -407,7 +408,7 @@ static FastDBStatus check_free_space(const FDBDisk *disk, uint64_t reservation)
 static FastDBStatus estimate_tree_file_bytes(const FDBDisk *disk, const FDBTree *tree,
                                               uint64_t *estimate)
 {
-    uint64_t total = 0;
+    uint64_t total = 0, largest_key = 0;
     for (const FDBNode *node = fdb_tree_bound(tree, (FastDBSlice){0}, false); node != NULL;
          node = fdb_tree_bound(tree, node->record.key, true)) {
         uint64_t key = node->record.key.size;
@@ -418,14 +419,21 @@ static FastDBStatus estimate_tree_file_bytes(const FDBDisk *disk, const FDBTree 
         record = key + value + 160u;
         uint64_t filter = ((uint64_t)disk->table.bloom_bits_per_key + 7u) / 8u;
         uint64_t index = (uint64_t)node->record.key.size + 32u;
+        if (disk->table.partitioned)
+            index += key + SST_INDEX_ENTRY_BYTES + SST_INDEX_HEADER_BYTES + SST_CRC_BYTES;
+        if (key > largest_key)
+            largest_key = key;
         if (record > UINT64_MAX - filter || record + filter > UINT64_MAX - index ||
             total > UINT64_MAX - (record + filter + index))
             return FASTDB_LIMIT_EXCEEDED;
         total += record + filter + index;
     }
-    if (total > UINT64_MAX - disk->manifest.max_bytes)
+    uint64_t metadata = disk->manifest.max_bytes;
+    if (disk->table.partitioned)
+        metadata += 2 * largest_key + SST_INDEX_HEADER_BYTES + SST_CRC_BYTES;
+    if (total > UINT64_MAX - metadata)
         return FASTDB_LIMIT_EXCEEDED;
-    *estimate = total + disk->manifest.max_bytes;
+    *estimate = total + metadata;
     return FASTDB_OK;
 }
 

@@ -8,7 +8,7 @@
 
 static const FDBManifestLimits manifest_limits = {16, 4096, 16, 3};
 static const FDBWalLimits wal_limits = {16, 64, 8, 200, 256};
-static const FDBSSTLimits sst_limits = {16, 64, 80, 128, 512, 128, 10};
+static const FDBSSTLimits sst_limits = {16, 64, 80, 128, 512, 128, 10, false};
 
 typedef struct Fault {
     FDBFsOp op;

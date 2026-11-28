@@ -16,6 +16,7 @@ struct FastDBOptions {
     size_t arena_chunk_bytes;
     size_t block_cache_bytes;
     uint32_t sync_interval_ms;
+    bool partitioned_sstables;
     FastDBEvictionPolicy eviction_policy;
     size_t max_live_bytes;
 };

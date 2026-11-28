@@ -204,6 +204,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->flush_threshold = 0;
         options->arena_chunk_bytes = 0;
         options->block_cache_bytes = 0;
+        options->partitioned_sstables = false;
         options->sync_interval_ms = 0;
         fastdb_group_commit_options_default(&options->group_commit);
         fastdb_compaction_options_default(&options->compaction);
@@ -219,6 +220,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         next.flush_threshold = 0;
         next.arena_chunk_bytes = 0;
         next.block_cache_bytes = 0;
+        next.partitioned_sstables = false;
         next.sync_interval_ms = 0;
     }
     if (settings == NULL)
@@ -243,6 +245,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->flush_threshold = next.flush_threshold;
     options->arena_chunk_bytes = next.arena_chunk_bytes;
     options->block_cache_bytes = next.block_cache_bytes;
+    options->partitioned_sstables = next.partitioned_sstables;
     options->sync_interval_ms = next.sync_interval_ms;
     options->group_commit = next.group_commit;
     return FASTDB_OK;
@@ -255,6 +258,18 @@ FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t mi
         return FASTDB_INVALID_ARGUMENT;
     options->sync_interval_ms = milliseconds;
     return FASTDB_OK;
+}
+
+FastDBStatus fastdb_options_set_partitioned_sstables(FastDBOptions *options, bool enabled)
+{
+    if (options == NULL || options->path == NULL)
+        return FASTDB_INVALID_ARGUMENT;
+    FastDBOptions next = *options;
+    next.partitioned_sstables = enabled;
+    FastDBStatus status = fdb_disk_validate(&next);
+    if (status == FASTDB_OK)
+        options->partitioned_sstables = enabled;
+    return status;
 }
 
 FastDBStatus fastdb_options_set_group_commit(FastDBOptions *options,

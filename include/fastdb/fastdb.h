@@ -155,6 +155,8 @@ FASTDB_API FastDBStatus fastdb_options_set_eviction(FastDBOptions *options,
 FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
                                                    const char *path,
                                                    const FastDBPersistentOptions *settings);
+/* Persistent modes only. Enable v2 partitioned output on the next open. */
+FASTDB_API FastDBStatus fastdb_options_set_partitioned_sstables(FastDBOptions *options, bool enabled);
 /* Interval durability only. Positive milliseconds, default 100 when unset. */
 FASTDB_API FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t milliseconds);
 /* Group commit only. Zero collection delay processes requests already queued. */

@@ -1370,6 +1370,50 @@ the V062 Docker workaround. The first Docker launch was rejected because
 automatic review had reached its usage limit. A later approved launch
 restored Docker verification during the session.
 
+## P4.4 partitioned SSTable v2 (V079)
+
+The Docker GCC Debug baseline at `f1e3b7e` passed 29/29. The test-first
+build stopped because `FDBSSTLimits` had no partitioned writer setting.
+The final reader test writes repeated revisions across leaves and checks
+lower-bound seeks, a second simultaneous cursor, corrupt leaf CRC, a
+bad root offset with a new checksum, and Bloom fallback with one
+reported corrupt partition. A separate 2,048-row table exceeds 2 MiB
+with under 64 KiB of configured reader workspace. The writer test fills
+its root directory, rejects another row and finishes a readable file.
+The public compaction fixture publishes v1 and v2 inputs, compacts them
+together, and reopens with v1 selected for new output.
+
+```sh
+cmake -S /repo -B /tmp/p44b-base -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p44b-base --parallel 6
+ctest --test-dir /tmp/p44b-base --output-on-failure
+cmake -S /repo -B /tmp/p44b-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p44b-red --target fastdb_sstable_reader fastdb_compaction --parallel 6
+CC=gcc cmake -S /repo -B /tmp/p44b-gcc -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p44b-gcc --parallel 6
+ctest --test-dir /tmp/p44b-gcc -R '^fastdb_sstable_reader$' --repeat until-fail:5 --output-on-failure
+ctest --test-dir /tmp/p44b-gcc --output-on-failure
+CC=clang cmake -S /repo -B /tmp/p44b-clang -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/p44b-clang --parallel 6
+ctest --test-dir /tmp/p44b-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p44b-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p44b-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p44b-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p44b-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p44b-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p44b-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The focused writer, reader and compaction targets passed in
+`/tmp/p44b-focused`. The final reader target passed five focused runs.
+All full profiles passed 29/29, including `docker build -t
+fastdb-native:local .`. The V062 TSan workaround ran seven targets five
+times each. A temporary Docker test image derived from
+`fastdb-local-toolchain:bookworm` installed `liblz4-dev` 1.9.4-1 and
+`pkg-config` for the next task.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

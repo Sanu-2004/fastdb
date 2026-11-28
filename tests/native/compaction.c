@@ -301,7 +301,7 @@ static void workspace_limits_fan_in(void)
     FDBSSTLimits table = {
         options->limits.max_key_bytes, options->limits.max_value_bytes,
         options->storage.target_block_bytes, block, options->storage.max_index_bytes,
-        options->storage.max_filter_bytes, options->storage.bloom_bits_per_key,
+        options->storage.max_filter_bytes, options->storage.bloom_bits_per_key, false,
     };
     size_t reader, writer;
     CHECK(fdb_sst_reader_budget(&table, &reader));
@@ -484,6 +484,47 @@ static void compact_with_one_filter_buffer(void)
     remove_disk_fixture(path);
 }
 
+static void mixed_partitioned_compaction(void)
+{
+    char path[] = "/tmp/fastdb-mixed-sst.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDB *db;
+    const unsigned char value[96] = {2};
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, value, sizeof(value)));
+    OK(fastdb_put(db, "k", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_compact(db));
+    OK(fastdb_close(db));
+
+    FastDBPersistentOptions storage = options->storage;
+    storage.max_filter_bytes = FDB_BLOOM_MIN_IMAGE_BYTES;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    OK(fastdb_options_set_partitioned_sstables(options, true));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "b", 1, value, sizeof(value)));
+    OK(fastdb_put(db, "k", 1, value, sizeof(value)));
+    OK(fastdb_delete(db, "z", 1));
+    OK(fastdb_flush(db));
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){1, 1}, 2);
+
+    OK(fastdb_open(options, &db));
+    OK(fastdb_compact(db));
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 1}, 2);
+    OK(fastdb_options_set_partitioned_sstables(options, false));
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"a", 1}, (FastDBSlice){value, sizeof(value)}, 1);
+    expect_value(db, (FastDBSlice){"b", 1}, (FastDBSlice){value, sizeof(value)}, 3);
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){value, sizeof(value)}, 4);
+    expect_missing(db, (FastDBSlice){"z", 1});
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     reclaim_shadowed_versions();
@@ -496,4 +537,5 @@ int main(void)
     workspace_limit();
     reserve_split_outputs_in_one_edit();
     compact_with_one_filter_buffer();
+    mixed_partitioned_compaction();
 }
