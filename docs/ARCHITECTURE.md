@@ -46,8 +46,8 @@ table reader workspace against that same engine budget.
 entries and tombstones in both trees. An overwritten key can appear in both
 counts until publication removes the frozen copy.
 
-The internal merge streams sorted SSTables through one block buffer per
-reader and a min-heap of current records. Identical copies of a revision for
+The internal merge streams sorted SSTables through bounded cursors and a
+min-heap of current records. Identical copies of a revision for
 the same key are deduplicated. Conflicting copies fail the merge. Compaction
 omits older PUTs shadowed by a newer record in the same merge. An unsplit
 bottom-level job can also omit a DELETE and its older versions when the
@@ -71,6 +71,13 @@ published catalog. The last level receives data and has no automatic
 promotion. Every compaction job retains the manifest sequence and the active
 WAL. A manual call can complete several independent catalog edits.
 See [ADR 0004](adr/0004-serial-leveled-compaction.md).
+
+Size-tiered compaction groups files by stored byte size. The planner uses
+the same bounded streaming executor and publishes overlapping outputs in
+L0. Publication revalidates the selected input IDs. Each successful job
+reduces the number of live tables. Reads select the greatest visible
+revision across all candidates, including files from earlier leveled
+jobs. See [ADR 0012](adr/0012-size-tiered-compaction.md).
 
 Point lookups use one bounded, reference-protected catalog view per LSM
 database. The capture contains the matching entries from one installed

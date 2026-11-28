@@ -325,11 +325,11 @@ existing levels. An out-of-range file level fails catalog validation.
 
 | Compaction setting | Default | Scope |
 |---|---:|---|
-| `enabled` | true | Enables leveled scheduling after flush and manual compact calls |
+| `enabled` | true | Enables automatic scheduling after flush and manual compact calls |
 | `max_levels` | 7 | Includes L0 and the last level, range 2–32 |
-| `level0_file_trigger` | 4 | Minimum L0 file count for automatic selection |
-| `level1_bytes` | 256 MiB | L1 schedules above this size |
-| `level_multiplier` | 10 | Multiplier for successive upper levels, minimum 2 |
+| `level0_file_trigger` | 4 | Minimum L0 file count for leveled scheduling or minimum files per size tier for size-tiered scheduling |
+| `level1_bytes` | 256 MiB | Leveled scheduling threshold for L1 |
+| `level_multiplier` | 10 | Leveled multiplier for successive upper levels, minimum 2 |
 | `max_merge_inputs` | 8 | Maximum open input tables per job, minimum 2 |
 | `max_working_bytes` | 0 | Optional per-job workspace ceiling. Zero uses available engine memory. |
 | `target_file_bytes` | 64 MiB | Soft compaction output target at key boundaries |
@@ -362,7 +362,28 @@ keeps the highest input revision for WAL recovery, keeps the latest PUT
 regardless of TTL, and keeps DELETE masks when a snapshot already pins
 tables or the job lacks workspace for one extra maximum-size key. See
 [ADR 0004](adr/0004-serial-leveled-compaction.md) for the reclamation proof.
-Size-tiered compaction is pending.
+
+Call `fastdb_options_set_lsm_compaction_strategy` after selecting LSM to
+choose `FASTDB_COMPACTION_SIZE_TIERED` on the next open. The default is
+`FASTDB_COMPACTION_LEVELED`. Profile selection resets the strategy to the
+default, so apply the override after a preset.
+
+Size-tiered scheduling groups SSTables from the catalog into powers-of-two
+intervals of stored bytes. An automatic job takes files by increasing ID
+from the smallest tier with at least `max(2, level0_file_trigger)` files.
+The normal memory and descriptor limits can reduce the job's fan-in.
+Manual jobs require two intersecting files and prefer the smallest eligible
+tier, then can select across tiers. Range bounds select whole files.
+
+Outputs go to L0 and may overlap retained files. The soft output target
+is the larger of `target_file_bytes` and the sum of the stored input
+sizes. Output still splits at key boundaries subject to hard metadata
+limits. A job that would need at least as many outputs as inputs returns
+`FASTDB_LIMIT_EXCEEDED` and leaves those inputs authoritative. Each call
+attempts at most the number of files in the catalog at its start.
+Tiered compaction retains DELETE masks and the latest expired PUT. Both
+strategies use the same manifest and sequence-based read semantics.
+See [ADR 0012](adr/0012-size-tiered-compaction.md).
 
 Eviction is disabled by default. Workspace charges describe
 engine-requested allocations and reserved capacity. See

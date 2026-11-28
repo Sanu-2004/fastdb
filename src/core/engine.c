@@ -216,6 +216,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->sync_interval_ms = 0;
         fastdb_group_commit_options_default(&options->group_commit);
         fastdb_compaction_options_default(&options->compaction);
+        options->compaction_strategy = FASTDB_COMPACTION_LEVELED;
         return FASTDB_OK;
     }
     if ((mode != FASTDB_MODE_MEMORY_PERSISTENT && mode != FASTDB_MODE_LSM) ||
@@ -225,6 +226,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     next.mode = mode;
     if (mode != options->mode) {
         fastdb_compaction_options_default(&next.compaction);
+        next.compaction_strategy = FASTDB_COMPACTION_LEVELED;
         next.flush_threshold = 0;
         next.arena_chunk_bytes = 0;
         next.block_cache_bytes = 0;
@@ -251,6 +253,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->mode = mode;
     options->storage = next.storage;
     options->compaction = next.compaction;
+    options->compaction_strategy = next.compaction_strategy;
     options->flush_threshold = next.flush_threshold;
     options->arena_chunk_bytes = next.arena_chunk_bytes;
     options->block_cache_bytes = next.block_cache_bytes;
@@ -388,6 +391,16 @@ FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
     if (status == FASTDB_OK)
         options->compaction = *settings;
     return status;
+}
+
+FastDBStatus fastdb_options_set_lsm_compaction_strategy(FastDBOptions *options,
+                                                         FastDBCompactionStrategy strategy)
+{
+    if (options == NULL || options->mode != FASTDB_MODE_LSM ||
+        (strategy != FASTDB_COMPACTION_LEVELED && strategy != FASTDB_COMPACTION_SIZE_TIERED))
+        return FASTDB_INVALID_ARGUMENT;
+    options->compaction_strategy = strategy;
+    return FASTDB_OK;
 }
 
 FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options, size_t memtable_bytes)

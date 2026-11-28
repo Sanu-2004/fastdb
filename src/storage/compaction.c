@@ -81,7 +81,8 @@ static bool ranges_overlap(FastDBSlice left_min, FastDBSlice left_max,
 uint64_t fdb_compaction_gc_anchor(const FDBManifest *manifest, const FDBCompactionPolicy *policy,
                                    const FDBCompactionPlan *plan, const uint64_t *input_ids)
 {
-    if (plan->destination_level != policy->levels - 1 || plan->split_after.size != 0)
+    if (policy->strategy == FASTDB_COMPACTION_SIZE_TIERED ||
+        plan->destination_level != policy->levels - 1 || plan->split_after.size != 0)
         return 0;
     FastDBSlice minimum = {0}, maximum = {0};
     uint64_t anchor = 0;
@@ -107,9 +108,17 @@ uint64_t fdb_compaction_gc_anchor(const FDBManifest *manifest, const FDBCompacti
     return anchor;
 }
 
-static FastDBStatus validate_inputs(const Build *build)
+static FastDBStatus validate_inputs(const Build *build, FastDBCompactionStrategy strategy)
 {
     const FDBManifest *manifest = &build->set->catalog.view;
+    if (strategy == FASTDB_COMPACTION_SIZE_TIERED) {
+        /* L0 outputs may overlap any retained file. Reserved input IDs are immutable. */
+        for (size_t i = 0; i < build->plan->count; ++i) {
+            if (find_input(manifest, build->input_ids[i]) == NULL)
+                return FASTDB_CONFLICT;
+        }
+        return FASTDB_OK;
+    }
     const FDBManifestEntry *source = find_input(manifest, build->input_ids[0]);
     if (source == NULL || source->level != build->plan->source_level)
         return FASTDB_CONFLICT;
@@ -169,6 +178,13 @@ static FastDBStatus write_outputs(Build *build, const FDBCompactionPolicy *polic
     FDBWalSet *set = build->set;
     size_t count = build->plan->count;
     size_t outputs = set->catalog_limits.max_files - (set->catalog.view.count - count);
+    if (policy->strategy == FASTDB_COMPACTION_SIZE_TIERED) {
+        /* Reject a split that cannot reduce the number of runs. */
+        if (outputs >= count)
+            outputs = count - 1;
+        if (limits.target_output_bytes < build->plan->input_bytes)
+            limits.target_output_bytes = build->plan->input_bytes;
+    }
     if (limits.max_outputs > outputs)
         limits.max_outputs = outputs;
     uint64_t ids_left = UINT64_MAX - set->catalog.view.next_file_id;
@@ -228,7 +244,7 @@ static FastDBStatus write_outputs(Build *build, const FDBCompactionPolicy *polic
                 status = FASTDB_CONFLICT;
         }
         if (status == FASTDB_OK && mutex != NULL)
-            status = validate_inputs(build);
+            status = validate_inputs(build, policy->strategy);
         if (status == FASTDB_OK && mutex != NULL && limits.gc_anchor != 0 &&
             limits.gc_anchor != fdb_compaction_gc_anchor(&set->catalog.view, policy,
                                                          build->plan, build->input_ids))

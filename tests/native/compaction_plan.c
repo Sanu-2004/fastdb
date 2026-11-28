@@ -24,7 +24,10 @@ static void closure_and_staging(void)
     };
     FDBManifest manifest = {.mode = FDB_MODE_LSM, .entries = files,
                              .count = sizeof(files) / sizeof(files[0])};
-    FDBCompactionPolicy policy = {3, 3, 100, 10, 4};
+    FDBCompactionPolicy policy = {
+        .levels = 3, .level0_file_trigger = 3, .level1_bytes = 100,
+        .level_multiplier = 10, .max_inputs = 4,
+    };
     FDBCompactionPlan plan;
     size_t inputs[4];
     OK(fdb_compaction_plan(&manifest, &policy, false, NULL, inputs, &plan));
@@ -54,7 +57,10 @@ static void levels_and_range(void)
     };
     FDBManifest manifest = {.mode = FDB_MODE_LSM, .entries = files,
                              .count = sizeof(files) / sizeof(files[0])};
-    FDBCompactionPolicy policy = {4, 2, 100, 10, 3};
+    FDBCompactionPolicy policy = {
+        .levels = 4, .level0_file_trigger = 2, .level1_bytes = 100,
+        .level_multiplier = 10, .max_inputs = 3,
+    };
     FDBCompactionPlan plan;
     size_t inputs[3];
     OK(fdb_compaction_plan(&manifest, &policy, false, NULL, inputs, &plan));
@@ -85,8 +91,52 @@ static void levels_and_range(void)
     STATUS(fdb_compaction_plan(&manifest, &policy, true, NULL, inputs, &plan), FASTDB_CORRUPTION);
 }
 
+static void size_tiered_selection(void)
+{
+    FDBManifestEntry files[] = {
+        table(1, 1, 1500, SLICE("a"), SLICE("b")),
+        table(2, 0, 128, SLICE("b"), SLICE("e")),
+        table(3, 0, 192, SLICE("c"), SLICE("f")),
+        table(4, 0, 512, SLICE("x"), SLICE("y")),
+        table(5, 2, 255, SLICE("x"), SLICE("z")),
+        table(6, 0, UINT64_MAX, SLICE("m"), SLICE("o")),
+        table(7, 0, UINT64_MAX - 1, SLICE("p"), SLICE("q")),
+        {.id = 8, .kind = FDB_FILE_WAL},
+    };
+    FDBManifest manifest = {.mode = FDB_MODE_LSM, .entries = files,
+                             .count = sizeof(files) / sizeof(files[0])};
+    FDBCompactionPolicy policy = {
+        .levels = 3, .level0_file_trigger = 3, .level1_bytes = 100,
+        .level_multiplier = 10, .max_inputs = 2, .strategy = FASTDB_COMPACTION_SIZE_TIERED,
+    };
+    FDBCompactionPlan plan;
+    size_t inputs[3] = {0, 0, SIZE_MAX};
+    OK(fdb_compaction_plan(&manifest, &policy, false, NULL, inputs, &plan));
+    CHECK(plan.count == 2 && plan.destination_level == 0 && plan.split_after.size == 0);
+    CHECK(inputs[0] == 1 && inputs[1] == 2 && inputs[2] == SIZE_MAX);
+    CHECK(plan.input_bytes == 320);
+    policy.max_inputs = 3;
+    OK(fdb_compaction_plan(&manifest, &policy, false, NULL, inputs, &plan));
+    CHECK(plan.count == 3 && inputs[2] == 4 && plan.input_bytes == 575);
+
+    policy.level0_file_trigger = 4;
+    OK(fdb_compaction_plan(&manifest, &policy, false, NULL, inputs, &plan));
+    CHECK(plan.count == 0);
+    FastDBRange range = {.start = SLICE("y"), .end = SLICE("z"), .start_exclusive = true};
+    OK(fdb_compaction_plan(&manifest, &policy, true, &range, inputs, &plan));
+    CHECK(plan.count == 0);
+    range.start_exclusive = false;
+    OK(fdb_compaction_plan(&manifest, &policy, true, &range, inputs, &plan));
+    CHECK(plan.count == 2 && inputs[0] == 3 && inputs[1] == 4 && plan.input_bytes == 767);
+    range = (FastDBRange){.start = SLICE("m"), .end = SLICE("r")};
+    OK(fdb_compaction_plan(&manifest, &policy, true, &range, inputs, &plan));
+    CHECK(plan.count == 2 && inputs[0] == 5 && inputs[1] == 6);
+    CHECK(plan.input_bytes == UINT64_MAX);
+}
+
 int main(void)
 {
     closure_and_staging();
     levels_and_range();
+    size_tiered_selection();
 }

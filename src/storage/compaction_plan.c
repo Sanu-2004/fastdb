@@ -5,7 +5,9 @@ bool fdb_compaction_policy_valid(const FDBCompactionPolicy *policy)
 {
     return policy != NULL && policy->levels >= 2 &&
            policy->levels <= FDB_MAX_COMPACTION_LEVELS && policy->level0_file_trigger != 0 &&
-           policy->level1_bytes != 0 && policy->level_multiplier >= 2 && policy->max_inputs >= 2;
+           policy->level1_bytes != 0 && policy->level_multiplier >= 2 && policy->max_inputs >= 2 &&
+           (policy->strategy == FASTDB_COMPACTION_LEVELED ||
+            policy->strategy == FASTDB_COMPACTION_SIZE_TIERED);
 }
 
 static bool overlap(const FDBManifestEntry *a, const FDBManifestEntry *b)
@@ -51,6 +53,51 @@ static bool in_range(const FDBManifestEntry *file, const FastDBRange *range)
 static uint64_t saturating_add(uint64_t a, uint64_t b)
 {
     return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
+enum { SIZE_TIERS = 64 };
+
+static size_t size_tier(uint64_t bytes)
+{
+    size_t tier = 0;
+    while (bytes > 1) {
+        bytes >>= 1;
+        ++tier;
+    }
+    return tier;
+}
+
+static bool tier_candidate(const FDBManifestEntry *file, const FastDBRange *range)
+{
+    return file->kind == FDB_FILE_SSTABLE && in_range(file, range);
+}
+
+static void choose_size_tier(const FDBManifest *manifest, const FDBCompactionPolicy *policy,
+                             bool manual, const FastDBRange *range,
+                             size_t *inputs, FDBCompactionPlan *out)
+{
+    size_t counts[SIZE_TIERS] = {0};
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const FDBManifestEntry *file = &manifest->entries[i];
+        if (tier_candidate(file, range))
+            ++counts[size_tier(file->bytes)];
+    }
+    size_t trigger = manual || policy->level0_file_trigger < 2 ? 2 : policy->level0_file_trigger;
+    size_t tier = 0;
+    while (tier < SIZE_TIERS && counts[tier] < trigger)
+        ++tier;
+    if (tier == SIZE_TIERS && !manual)
+        return;
+    /* Catalog order is by file ID. Manual compaction can fall back across tiers. */
+    for (size_t i = 0; i < manifest->count && out->count < policy->max_inputs; ++i) {
+        const FDBManifestEntry *file = &manifest->entries[i];
+        if (!tier_candidate(file, range) || (tier < SIZE_TIERS && size_tier(file->bytes) != tier))
+            continue;
+        inputs[out->count++] = i;
+        out->input_bytes = saturating_add(out->input_bytes, file->bytes);
+    }
+    if (out->count < 2)
+        *out = (FDBCompactionPlan){0};
 }
 
 static size_t choose_source(const FDBManifest *manifest, const FDBCompactionPolicy *policy,
@@ -105,6 +152,11 @@ FastDBStatus fdb_compaction_plan(const FDBManifest *manifest, const FDBCompactio
     if (range != NULL && range->start.size != 0 && range->end.size != 0 &&
         fdb_compare(range->start, range->end) >= 0)
         return FASTDB_OK;
+
+    if (policy->strategy == FASTDB_COMPACTION_SIZE_TIERED) {
+        choose_size_tier(manifest, policy, manual, range, inputs, out);
+        return FASTDB_OK;
+    }
 
     size_t source_index = choose_source(manifest, policy, manual, range);
     if (source_index == SIZE_MAX)

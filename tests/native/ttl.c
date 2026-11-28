@@ -239,6 +239,34 @@ static void grouped_purge_waits_for_sync(void)
     remove_disk_fixture(path);
 }
 
+static void size_tiered_expiry_mask(void)
+{
+    char path[] = "/tmp/fastdb-tiered-ttl.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = disk_options(path, FASTDB_DURABILITY_SYNC);
+    OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_SIZE_TIERED));
+    test_clock = (Clock){.now = 1000};
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "a", 1, "old", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_put_with_ttl(db, "a", 1, "new", 3, 10));
+    OK(fastdb_flush(db));
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    test_clock.now = 1010;
+    OK(fastdb_compact(db));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    expect_snapshot(snapshot, "new", 2);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_close(db));
+    OK(fastdb_open(options, &db));
+    expect_missing(db, (FastDBSlice){"a", 1});
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     boundary_purge_and_clock_errors();
@@ -246,4 +274,5 @@ int main(void)
     durable_ttl(FASTDB_MODE_LSM);
     purge_partial_error();
     grouped_purge_waits_for_sync();
+    size_tiered_expiry_mask();
 }

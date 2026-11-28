@@ -12,6 +12,7 @@ struct FastDBOptions {
     FastDBPersistentOptions storage;
     FastDBGroupCommitOptions group_commit;
     FastDBCompactionOptions compaction;
+    FastDBCompactionStrategy compaction_strategy;
     size_t flush_threshold;
     size_t arena_chunk_bytes;
     size_t block_cache_bytes;

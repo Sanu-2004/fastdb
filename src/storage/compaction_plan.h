@@ -11,6 +11,7 @@ typedef struct FDBCompactionPolicy {
     uint64_t level1_bytes;
     uint32_t level_multiplier;
     size_t max_inputs;
+    FastDBCompactionStrategy strategy;
 } FDBCompactionPolicy;
 
 typedef struct FDBCompactionPlan {
@@ -19,6 +20,8 @@ typedef struct FDBCompactionPlan {
     size_t count;
     /* In a staged job, keys above this inclusive boundary stay at source_level. */
     FastDBSlice split_after;
+    /* Size-tiered soft output target uses the saturated sum of stored input bytes. */
+    uint64_t input_bytes;
 } FDBCompactionPlan;
 
 bool fdb_compaction_policy_valid(const FDBCompactionPolicy *policy);

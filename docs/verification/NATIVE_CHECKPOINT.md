@@ -1597,6 +1597,68 @@ docker build --build-arg FASTDB_ENABLE_LZ4=ON --build-arg FASTDB_ENABLE_ZSTD=ON 
 docker run --rm --network none fastdb-native:p46-profiles --version
 ```
 
+## P4.6 size-tiered compaction (V083)
+
+The baseline at `1028522` passed 31/31 in GCC Debug with both codecs.
+The test-first planner build failed on the missing strategy and tiered
+plan fields. Docker Desktop was restarted after its Linux daemon stopped.
+Both builds used a read-only source mount in
+`fastdb-local-toolchain:codecs`.
+
+```sh
+cmake -S /repo -B /tmp/p46-baseline -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_ENABLE_LZ4=ON -DFASTDB_ENABLE_ZSTD=ON
+cmake --build /tmp/p46-baseline --parallel 6
+ctest --test-dir /tmp/p46-baseline --output-on-failure
+cmake -S /repo -B /tmp/p46-tiered-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p46-tiered-red --target fastdb_compaction_plan --parallel 6
+```
+
+The focused compaction planner, compaction, TTL and public crash targets
+passed. The final cases verify deterministic selection and fan-in, a
+size overflow boundary, overlapping run reads by revision, snapshot and
+TTL visibility, whole-file range selection, switching strategy on reopen,
+a three-input two-output split, and retained inputs and retry when a
+two-input job would need two outputs. A gated worker test holds two
+compaction readers and a point-read descriptor during a foreground L0
+publication and checks the descriptor cap and reopen. The public crash
+test adds nine tiered compaction kill points and verifies the same
+acknowledged data and revisions after each reopen.
+
+```sh
+for variant in plain dual clang asan tsan; do
+  cc=gcc; build=Debug; codec=ON; sanitizer=none; linker=
+  case "$variant" in
+    plain) codec=OFF ;;
+    clang) cc=clang; build=Release ;;
+    asan) sanitizer=address; linker=-no-pie ;;
+    tsan) sanitizer=thread; linker=-no-pie ;;
+  esac
+  dir="/tmp/p46-tiered-$variant"
+  CC="$cc" cmake -S /repo -B "$dir" -DCMAKE_BUILD_TYPE="$build" \
+    -DFASTDB_ENABLE_LZ4="$codec" -DFASTDB_ENABLE_ZSTD="$codec" \
+    -DFASTDB_SANITIZER="$sanitizer" -DCMAKE_EXE_LINKER_FLAGS="$linker"
+  cmake --build "$dir" --parallel 4
+  case "$variant" in
+    tsan)
+      setarch x86_64 -R ctest --test-dir "$dir" -L concurrency \
+        --repeat until-fail:5 --output-on-failure
+      setarch x86_64 -R ctest --test-dir "$dir" -R '^fastdb_compaction$' \
+        --repeat until-fail:3 --output-on-failure
+      ;;
+    *) ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$dir" --output-on-failure ;;
+  esac
+done
+docker build --build-arg FASTDB_ENABLE_LZ4=ON --build-arg FASTDB_ENABLE_ZSTD=ON \
+  -t fastdb-native:p46-tiered .
+docker run --rm --network none fastdb-native:p46-tiered --version
+```
+
+Both GCC builds, Clang Release, ASan/UBSan with leak detection, and the
+Docker Release build each passed 31/31. TSan used the V062 setup and
+passed 35 concurrency executions and three executions of the compaction
+target. The Docker version command printed `0.1.0`.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

@@ -122,6 +122,11 @@ keeps the original inputs. Uncertain publication poisons the handle so
 reopen can select the authoritative state before any deletion. A retry after
 a certain error cleans orphans from the prior attempt using the active catalog.
 
+Size-tiered compaction uses the same reservation and atomic replacement.
+It retains DELETE and expiration masks and accepts splits only when they
+reduce the number of selected files. A later overlapping run published by
+a foreground flush remains referenced when the merge publishes.
+
 When a point lookup pins SSTable names, the installed catalog can advance
 while original files remain available. The publisher defers reclamation and
 any further replacement waits for the pin to release. The next maintenance
@@ -148,5 +153,4 @@ covered WALs in one edit. The live tree stays in RAM. Checkpoints run on
 request and before rotating beyond the configured WAL segment count.
 
 See the [implementation ledger](../PROGRESS.md) for executed fault and
-process-kill tests. Background compaction and power-loss validation remain
-pending.
+process-kill tests. Power-loss validation remains pending.

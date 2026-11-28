@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-28\
-**Last verified base commit / branch:** `ef96580` / `main`. V082 verifies the native profiles in P4.6.
+**Last verified base commit / branch:** `1028522` / `main`. V083 completes P4.6.
 **Current milestone:** P4 — performance and configuration hardening.\
-**Next task:** P4.6 — size-tiered compaction.
+**Next task:** P4.7 — native metrics and benchmark harness.
 
 ## 1. How to use this file
 
@@ -117,7 +117,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P4.3 | Group commit and interval sync worker; durable ACK ordering and sync-failure tests. | DONE | V076 verifies interval sync. V077 verifies one group sync for concurrent PUT/CAS/batch in both persistent modes, no early acknowledgement or live visibility, bounded count and bytes, rotation, failure outcomes, expiry purge and process-kill recovery. |
 | P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | DONE | V078 verifies bounded v1 Bloom reads. V079 verifies v2 writer limits, root and leaf checks, a table above 2 MiB under 64 KiB reader workspace, revisions crossing leaves, and mixed v1/v2 compaction and reopen. [ADR 0011](docs/adr/0011-partitioned-sstable-indexes.md). |
 | P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | DONE | V080 and V081 verify both optional codecs, raw fallback, mixed compaction, checked decoding, cache and recovery memory accounting, expansion headroom, installed clients and Docker builds. |
-| P4.6 | Size-tiered compaction and validated storage profiles; consistent search semantics across overlapping runs. | IN_PROGRESS | V082 verifies the six native profiles across supported modes, preset validation, active cache and flush worker, low-memory limits and persistent reopen. Size-tiered selection, scheduling and integration remain open. |
+| P4.6 | Size-tiered compaction and validated storage profiles; consistent search semantics across overlapping runs. | DONE | V082 verifies all six native profiles. V083 verifies bounded size-tiered selection and split progress, revision-based reads, expiration and DELETE masks, snapshots, compatibility with leveled reopen, concurrent flush and crash recovery. [ADR 0012](docs/adr/0012-size-tiered-compaction.md). |
 | P4.7 | Native stats/metrics and benchmark harness; repeatable baseline measurements before optimization. | TODO | — |
 | P4.8 | Runtime config introspection, live/reopen/migrate classification, low-memory and resource-limit tests. | TODO | — |
 
@@ -200,12 +200,12 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021. V074 revalidates the 512-byte memory fixture after adding the LSM allocator. |
 | G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021. V076–V077 revalidate WAL reopen and revisions with interval and group commit. |
 | G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021, V075, and V078–V081. V079 validates directory and leaves. V080 and V081 check both codecs, corrupt payloads and lengths, disabled/unknown codecs, and mixed compaction. |
-| G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. |
+| G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. V083 verifies the size-tiered strategy. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | PASS | V067–V068 cover complete batches, CAS, memory and LSM snapshots, merged scans and concurrent snapshot/maintenance fixtures. Release stress remains in G08/G09. |
-| G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
+| G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 covers 28 process-kill scenarios across flush, checkpoint and compaction. V083 adds nine tiered compaction boundaries. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | V073 covers a deterministic multilevel merge larger than the engine budget. P8.3 tracks release-scale concurrent stress, RSS and FD measurements. |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V082 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V083 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -305,6 +305,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V080 | 2026-11-28 / P4.5 LZ4 based on `f970678` | Test-first build, GCC Debug with codec on/off, enabled Clang and sanitizers, CMake install consumers, and both Docker Release variants. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | The test build found the missing codec. The enabled build verifies compressed/raw blocks, invalid checksums, malformed payload, length caps, cache charges and mixed compaction. The disabled build refuses the codec explicitly. Full profiles and both Docker builds passed 30/30. Installed static and shared clients ran. TSan passed 35 executions. |
 | V081 | 2026-11-28 / P4.5 Zstd based on `b6d81c6` | LZ4 baseline, test-first builds, all four GCC codec combinations, dual-codec Clang and sanitizer profiles, installed clients and Docker default/dual builds. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p45-zstd-and-mixed-codec-verification-v081). | PASS | Baseline 30/30. Red cases identified missing Zstd support and underestimated compaction expansion. Final full profiles and both Docker builds passed 30/30. TSan passed 35 executions. Both codecs verify raw fallback, integrity, configured memory bounds and mixed compaction. |
 | V082 | 2026-11-28 / P4.6 profiles based on `ef96580` | Test-first build, GCC Debug default/dual, Clang Release dual, ASan/UBSan with leak detection dual, repeated TSan and Docker dual Release. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p46-validated-native-storage-profiles-v082). | PASS | The test-first build found the missing preset API. All four full native profiles and Docker passed 31/31. TSan passed five profile executions and 35 concurrency executions. The Docker CLI reported `0.1.0`. |
+| V083 | 2026-11-28 / P4.6 tiered compaction based on `1028522` | Baseline, test-first planner build, focused native and fault suites, GCC Debug default/dual, Clang Release, ASan/UBSan with leak detection, repeated TSan and Docker Release. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p46-size-tiered-compaction-v083). | PASS | Baseline and all final full suites passed 31/31. TSan passed 38 executions. Verified fan-in, split progress, held reader during concurrent L0 publication, snapshot visibility, latest revisions and masks, leveled compatibility and nine new process-kill cases. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -645,15 +646,21 @@ These are deliberate boundaries, not completed features:
 - Added six presets through one validated, atomic options setter. Preset selection owns a path copy and leaves the previous options intact on failure. Persistent presets accept either persistent mode, with LSM-specific cache and flush settings. The presets use the existing formats and support documented overrides.
 - V082 passed 31/31 in GCC Debug with both codecs disabled and enabled, Clang Release, ASan/UBSan with leak detection, and Docker Release. TSan passed 40 executions. P4.6 remains IN_PROGRESS for size-tiered compaction.
 
+### Session 036 — 2026-11-28 — Complete size-tiered compaction in P4.6
+
+- Started from pushed `1028522` and passed the 31-test baseline. Added planner, overlapping-run, TTL and crash fixtures first. The red build failed on the missing strategy and tiered plan fields. Restarted Docker Desktop when its Linux daemon stopped.
+- The tiered planner groups by stored file size and caps per-job fan-in and per-call attempts. Outputs use L0 to preserve existing catalog compatibility. A successful job reduces the table count. An unproductive split returns a limit error with input references intact. The existing atomic publisher and snapshot pins cover both strategies.
+- V083 passed 31/31 across the full matrix. TSan passed 38 executions. Nine tiered crash boundaries and a detached merge with a pinned reader and concurrent flush passed. P4.6 is DONE.
+
 ## 9. Current handoff
 
 - **Current milestone:** P4 — performance and configuration hardening.
-- **Next task ID:** P4.6.
-- **Next action:** Implement bounded size-tiered LSM compaction. The six native presets are already verified.
-- **Next commands:** Add test-first cases in `tests/native/compaction_plan.c` for deterministic similar-size selection, fan-in and empty/ineligible tiers, and in `tests/native/compaction.c` for overlapping run freshness, masking, snapshots and reopen. Add an opt-in strategy on the opaque LSM options. Wire planning through `src/storage/compaction_plan.c`, publication revalidation through `src/storage/compaction.c`, and scheduler limits through `src/core/disk.c`. Define how overlapping tiers are represented in the catalog and keep existing leveled manifests readable. Require progress for repeated jobs even when output splits. Retain masks until safety across unselected runs is proven. Run the complete V082 matrix after the focused cases.
-- **Last verified good checkpoint:** V082 native profiles on top of `ef96580`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the test-first and final runs.
-- **Working-tree state:** V082 includes the validated native profiles, tests and documentation. Confirm with `git status --short --branch`.
+- **Next task ID:** P4.7.
+- **Next action:** Add native storage metrics and use them in a repeatable benchmark harness.
+- **Next commands:** Add tests for a native storage stats snapshot across modes, WAL rotation, checkpoints, compaction and reopen. Keep the existing stats ABI and account for publications independently of cleanup outcomes. Add benchmark argument, workload and output checks before implementing the harness.
+- **Last verified good checkpoint:** V083 completes P4.6 on top of `1028522`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the test-first and final runs.
+- **Working-tree state:** V083 includes size-tiered compaction, regression tests and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
-- **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, power-loss tests and release-scale verification remain open.
+- **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Power-loss tests and release-scale verification remain open.
 
 **Completion rule:** If every required task is DONE and every applicable release gate has current PASS evidence, produce the engineering report and give the owner an evidence-based readiness assessment. Otherwise report exactly what remains and continue from the next task in a future requested coding session.

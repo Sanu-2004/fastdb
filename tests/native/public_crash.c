@@ -49,10 +49,10 @@ static void interrupt(FastDBOptions *options, Maintenance maintain, Boundary bou
     _exit(1);
 }
 
-static void crash_and_reopen(FastDBMode mode, Maintenance maintain, Boundary boundary)
+static void crash_and_reopen(FastDBMode mode, Maintenance maintain, Boundary boundary, bool tiered)
 {
-    fprintf(stderr, "mode=%d compact=%d killing before %s\n", mode,
-            maintain == fastdb_compact, boundary.description);
+    fprintf(stderr, "mode=%d compact=%d tiered=%d killing before %s\n", mode,
+            maintain == fastdb_compact, tiered, boundary.description);
     char path[] = "/tmp/fastdb-public-crash.XXXXXXXX";
     CHECK(mkdtemp(path) != NULL);
     FastDBOptions *options = disk_options_with_mode(path, mode, FASTDB_DURABILITY_SYNC);
@@ -61,6 +61,8 @@ static void crash_and_reopen(FastDBMode mode, Maintenance maintain, Boundary bou
         fastdb_compaction_options_default(&compaction);
         compaction.max_levels = 2;
         OK(fastdb_options_set_compaction(options, &compaction));
+        if (tiered)
+            OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_SIZE_TIERED));
     }
     FastDB *db;
     OK(fastdb_open(options, &db));
@@ -113,8 +115,9 @@ int main(void)
         {FDB_FS_UNLINK, 1, "reclaiming an obsolete file"},
     };
     for (size_t i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); ++i) {
-        crash_and_reopen(FASTDB_MODE_LSM, fastdb_flush, boundaries[i]);
-        crash_and_reopen(FASTDB_MODE_MEMORY_PERSISTENT, fastdb_checkpoint, boundaries[i]);
-        crash_and_reopen(FASTDB_MODE_LSM, fastdb_compact, boundaries[i]);
+        crash_and_reopen(FASTDB_MODE_LSM, fastdb_flush, boundaries[i], false);
+        crash_and_reopen(FASTDB_MODE_MEMORY_PERSISTENT, fastdb_checkpoint, boundaries[i], false);
+        crash_and_reopen(FASTDB_MODE_LSM, fastdb_compact, boundaries[i], false);
+        crash_and_reopen(FASTDB_MODE_LSM, fastdb_compact, boundaries[i], true);
     }
 }

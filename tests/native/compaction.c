@@ -615,6 +615,174 @@ static void mixed_zstd_compaction(void)
     remove_disk_fixture(path);
 }
 
+static void size_tiered_overlaps(void)
+{
+    char path[] = "/tmp/fastdb-tiered-overlay.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_SIZE_TIERED));
+    STATUS(fastdb_options_set_lsm_compaction_strategy(options, (FastDBCompactionStrategy)99),
+           FASTDB_INVALID_ARGUMENT);
+    FastDBOptions *memory;
+    OK(fastdb_options_create(&memory));
+    STATUS(fastdb_options_set_lsm_compaction_strategy(memory, FASTDB_COMPACTION_SIZE_TIERED),
+           FASTDB_INVALID_ARGUMENT);
+    fastdb_options_destroy(memory);
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    policy.level0_file_trigger = 2;
+    policy.max_merge_inputs = 2;
+    policy.enabled = false;
+    OK(fastdb_options_set_compaction(options, &policy));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    OK(fastdb_put(db, "k", 1, "old", 3));
+    OK(fastdb_put(db, "z", 1, "one", 3));
+    OK(fastdb_flush(db));
+    OK(fastdb_put(db, "k", 1, "mid", 3));
+    OK(fastdb_put(db, "z", 1, "two", 3));
+    OK(fastdb_flush(db));
+    STATUS(fastdb_compact(db), FASTDB_UNSUPPORTED);
+    OK(fastdb_close(db));
+    uint64_t staged = check_levels(path, (size_t[]){2, 0}, 2);
+
+    policy.enabled = true;
+    OK(fastdb_options_set_compaction(options, &policy));
+    OK(fastdb_open(options, &db));
+    FastDBSnapshot *snapshot;
+    OK(fastdb_snapshot_create(db, &snapshot));
+    unsigned char payload[120];
+    memset(payload, 'N', sizeof(payload));
+    OK(fastdb_put(db, "k", 1, payload, sizeof(payload)));
+    OK(fastdb_put(db, "y", 1, payload, sizeof(payload)));
+    OK(fastdb_delete(db, "z", 1));
+    OK(fastdb_flush(db));
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){payload, sizeof(payload)}, 5);
+    expect_missing(db, (FastDBSlice){"z", 1});
+
+    FastDBIterator *page;
+    OK(fastdb_scan_prefix(db, (FastDBSlice){0}, 4, &page));
+    FastDBSlice key, value;
+    uint64_t revision;
+    OK(fastdb_iterator_next(page, &key, &value, &revision));
+    CHECK(key.size == 1 && memcmp(key.data, "k", 1) == 0 && revision == 5 &&
+          value.size == sizeof(payload) && memcmp(value.data, payload, sizeof(payload)) == 0);
+    OK(fastdb_iterator_next(page, &key, &value, &revision));
+    CHECK(key.size == 1 && memcmp(key.data, "y", 1) == 0 && revision == 6);
+    STATUS(fastdb_iterator_next(page, &key, &value, &revision), FASTDB_NOT_FOUND);
+    fastdb_iterator_close(page);
+
+    OK(fastdb_snapshot_scan_prefix(snapshot, (FastDBSlice){0}, 4, &page));
+    OK(fastdb_iterator_next(page, &key, &value, &revision));
+    CHECK(key.size == 1 && memcmp(key.data, "k", 1) == 0 && revision == 3 &&
+          value.size == 3 && memcmp(value.data, "mid", 3) == 0);
+    OK(fastdb_iterator_next(page, &key, &value, &revision));
+    CHECK(key.size == 1 && memcmp(key.data, "z", 1) == 0 && revision == 4 &&
+          value.size == 3 && memcmp(value.data, "two", 3) == 0);
+    STATUS(fastdb_iterator_next(page, &key, &value, &revision), FASTDB_NOT_FOUND);
+    fastdb_iterator_close(page);
+    fastdb_snapshot_release(snapshot);
+    OK(fastdb_close(db));
+    uint64_t merged = check_levels(path, (size_t[]){2, 0}, 2);
+    CHECK(merged > staged);
+
+    OK(fastdb_open(options, &db));
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){payload, sizeof(payload)}, 5);
+    expect_missing(db, (FastDBSlice){"z", 1});
+    FastDBRange outside = {.start = {"z", 1}, .start_exclusive = true};
+    OK(fastdb_compact_range(db, &outside));
+    OK(fastdb_close(db));
+    CHECK(check_levels(path, (size_t[]){2, 0}, 2) == merged);
+
+    OK(fastdb_open(options, &db));
+    FastDBRange inside = {.start = {"y", 1}, .end = {"z", 1}};
+    OK(fastdb_compact_range(db, &inside));
+    OK(fastdb_close(db));
+    check_single_table(path, options, 0, 3, 1, 7);
+    OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_LEVELED));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_compact(db));
+    expect_value(db, (FastDBSlice){"k", 1}, (FastDBSlice){payload, sizeof(payload)}, 5);
+    expect_missing(db, (FastDBSlice){"z", 1});
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){0, 1}, 2);
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void size_tiered_rejects_nonreducing_split(void)
+{
+    char path[] = "/tmp/fastdb-tiered-split.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDBPersistentOptions storage = options->storage;
+    storage.max_index_bytes = 64;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_SIZE_TIERED));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    unsigned char payload[120] = {1};
+    for (char key = 'a'; key <= 'd'; ++key) {
+        OK(fastdb_put(db, &key, 1, payload, sizeof(payload)));
+        if (key == 'b' || key == 'd')
+            OK(fastdb_flush(db));
+    }
+    OK(fastdb_close(db));
+    uint64_t before = check_levels(path, (size_t[]){2, 0}, 2);
+    OK(fastdb_open(options, &db));
+    STATUS(fastdb_compact(db), FASTDB_LIMIT_EXCEEDED);
+    expect_value(db, (FastDBSlice){"d", 1}, (FastDBSlice){payload, sizeof(payload)}, 4);
+    OK(fastdb_close(db));
+    CHECK(check_levels(path, (size_t[]){2, 0}, 2) == before + 1);
+    storage.max_index_bytes = 128;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    OK(fastdb_open(options, &db));
+    OK(fastdb_compact(db));
+    for (char key = 'a'; key <= 'd'; ++key)
+        expect_value(db, (FastDBSlice){&key, 1}, (FastDBSlice){payload, sizeof(payload)},
+                     (uint64_t)(key - 'a' + 1));
+    OK(fastdb_close(db));
+    check_single_table(path, options, 0, 4, 0, 4);
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
+static void size_tiered_can_reduce_with_split_outputs(void)
+{
+    char path[] = "/tmp/fastdb-tiered-reducing.XXXXXXXX";
+    CHECK(mkdtemp(path) != NULL);
+    FastDBOptions *options = bottommost_options(path);
+    FastDBPersistentOptions storage = options->storage;
+    storage.max_index_bytes = 80;
+    OK(fastdb_options_set_storage(options, FASTDB_MODE_LSM, path, &storage));
+    OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_SIZE_TIERED));
+    FastDBCompactionOptions policy;
+    fastdb_compaction_options_default(&policy);
+    policy.max_levels = 2;
+    policy.level0_file_trigger = 3;
+    policy.max_merge_inputs = 3;
+    policy.target_file_bytes = 1;
+    OK(fastdb_options_set_compaction(options, &policy));
+    FastDB *db;
+    OK(fastdb_open(options, &db));
+    unsigned char payload[120] = {2};
+    for (char key = 'a'; key <= 'f'; ++key) {
+        OK(fastdb_put(db, &key, 1, payload, sizeof(payload)));
+        if ((key - 'a') % 2 == 1)
+            OK(fastdb_flush(db));
+    }
+    OK(fastdb_close(db));
+    check_levels(path, (size_t[]){2, 0}, 2);
+    OK(fastdb_open(options, &db));
+    for (char key = 'a'; key <= 'f'; ++key)
+        expect_value(db, (FastDBSlice){&key, 1}, (FastDBSlice){payload, sizeof(payload)},
+                     (uint64_t)(key - 'a' + 1));
+    OK(fastdb_close(db));
+    fastdb_options_destroy(options);
+    remove_disk_fixture(path);
+}
+
 int main(void)
 {
     reclaim_shadowed_versions();
@@ -630,4 +798,7 @@ int main(void)
     mixed_partitioned_compaction();
     mixed_codec_compaction();
     mixed_zstd_compaction();
+    size_tiered_overlaps();
+    size_tiered_rejects_nonreducing_split();
+    size_tiered_can_reduce_with_split_outputs();
 }

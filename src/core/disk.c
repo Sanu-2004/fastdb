@@ -122,7 +122,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     disk->policy = (FDBCompactionPolicy){
         disk->compaction.max_levels, disk->compaction.level0_file_trigger,
         disk->compaction.level1_bytes, disk->compaction.level_multiplier,
-        disk->compaction.max_merge_inputs,
+        disk->compaction.max_merge_inputs, options->compaction_strategy,
     };
     if (options->mode == FASTDB_MODE_LSM &&
         (!fdb_compaction_policy_valid(&disk->policy) || disk->compaction.target_file_bytes == 0))
@@ -960,8 +960,10 @@ FastDBStatus fdb_disk_compact(FastDB *db, bool manual, bool background,
         .target_output_bytes = disk->compaction.target_file_bytes,
         .discard_shadowed_puts = true,
     };
-    FastDBStatus status;
-    for (;;) {
+    FastDBStatus status = FASTDB_OK;
+    size_t jobs = policy.strategy == FASTDB_COMPACTION_SIZE_TIERED ?
+                  disk->log.catalog.view.count : SIZE_MAX;
+    for (; jobs != 0; --jobs) {
         FDBCompactionPlan plan;
         status = fdb_compaction_plan(&disk->log.catalog.view, &policy, manual, range, inputs, &plan);
         if (status != FASTDB_OK || plan.count == 0)

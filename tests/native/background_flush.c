@@ -476,7 +476,7 @@ static void *read_compaction_input(void *arg)
     return NULL;
 }
 
-static void close_drains_background_compaction(void)
+static void close_drains_background_compaction(bool tiered)
 {
     char path[] = "/tmp/fastdb-bg-compact-close.XXXXXXXX";
     CHECK(mkdtemp(path) != NULL);
@@ -486,8 +486,10 @@ static void close_drains_background_compaction(void)
     FastDBCompactionOptions policy;
     fastdb_compaction_options_default(&policy);
     policy.max_levels = 2;
-    policy.level0_file_trigger = 2;
+    policy.level0_file_trigger = tiered ? 3 : 2;
     OK(fastdb_options_set_compaction(options, &policy));
+    if (tiered)
+        OK(fastdb_options_set_lsm_compaction_strategy(options, FASTDB_COMPACTION_SIZE_TIERED));
     Gate gate = {.mutex = PTHREAD_MUTEX_INITIALIZER, .condition = PTHREAD_COND_INITIALIZER,
                  .foreground = pthread_self(), .operation = FDB_FS_WRITE};
     gate.track_fds = true;
@@ -691,7 +693,8 @@ int main(void)
     failed_rotation_keeps_active();
     close_during_build();
     worker_schedules_compaction_after_flush();
-    close_drains_background_compaction();
+    close_drains_background_compaction(false);
+    close_drains_background_compaction(true);
     failed_background_compaction_keeps_l0_flush();
     close_reports_unretried_compaction_error();
     crash_during_build(false);

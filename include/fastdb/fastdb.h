@@ -108,6 +108,11 @@ typedef struct FastDBGroupCommitOptions {
     uint32_t collection_delay_ms;
 } FastDBGroupCommitOptions;
 
+typedef enum FastDBCompactionStrategy {
+    FASTDB_COMPACTION_LEVELED = 0,
+    FASTDB_COMPACTION_SIZE_TIERED = 1
+} FastDBCompactionStrategy;
+
 typedef struct FastDBCompactionOptions {
     bool enabled;
     uint32_t max_levels;
@@ -186,6 +191,9 @@ FASTDB_API FastDBStatus fastdb_options_set_group_commit(FastDBOptions *options,
 /* Set after selecting LSM storage. A zero workspace cap uses available engine memory. */
 FASTDB_API FastDBStatus fastdb_options_set_compaction(FastDBOptions *options,
                                                       const FastDBCompactionOptions *settings);
+/* LSM only. Available after selecting LSM storage and applied on open. */
+FASTDB_API FastDBStatus fastdb_options_set_lsm_compaction_strategy(FastDBOptions *options,
+                                                                    FastDBCompactionStrategy strategy);
 /* LSM only. A nonzero active-tree byte threshold enables one background flush worker. */
 FASTDB_API FastDBStatus fastdb_options_set_lsm_flush_threshold(FastDBOptions *options,
                                                                size_t memtable_bytes);
