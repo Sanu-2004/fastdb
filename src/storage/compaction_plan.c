@@ -4,7 +4,7 @@
 bool fdb_compaction_policy_valid(const FDBCompactionPolicy *policy)
 {
     return policy != NULL && policy->levels >= 2 &&
-           policy->levels <= FDB_MAX_COMPACTION_LEVELS && policy->level0_file_trigger != 0 &&
+           policy->levels <= FASTDB_STORAGE_MAX_LEVELS && policy->level0_file_trigger != 0 &&
            policy->level1_bytes != 0 && policy->level_multiplier >= 2 && policy->max_inputs >= 2 &&
            (policy->strategy == FASTDB_COMPACTION_LEVELED ||
             policy->strategy == FASTDB_COMPACTION_SIZE_TIERED);
@@ -50,11 +50,6 @@ static bool in_range(const FDBManifestEntry *file, const FastDBRange *range)
     return range->end.size == 0 || fdb_compare(file->min_key, range->end) < 0;
 }
 
-static uint64_t saturating_add(uint64_t a, uint64_t b)
-{
-    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
-}
-
 enum { SIZE_TIERS = 64 };
 
 static size_t size_tier(uint64_t bytes)
@@ -94,7 +89,7 @@ static void choose_size_tier(const FDBManifest *manifest, const FDBCompactionPol
         if (!tier_candidate(file, range) || (tier < SIZE_TIERS && size_tier(file->bytes) != tier))
             continue;
         inputs[out->count++] = i;
-        out->input_bytes = saturating_add(out->input_bytes, file->bytes);
+        out->input_bytes = fdb_saturating_add_u64(out->input_bytes, file->bytes);
     }
     if (out->count < 2)
         *out = (FDBCompactionPlan){0};
@@ -103,9 +98,9 @@ static void choose_size_tier(const FDBManifest *manifest, const FDBCompactionPol
 static size_t choose_source(const FDBManifest *manifest, const FDBCompactionPolicy *policy,
                              bool manual, const FastDBRange *range)
 {
-    uint64_t bytes[FDB_MAX_COMPACTION_LEVELS] = {0};
-    uint64_t max_bytes[FDB_MAX_COMPACTION_LEVELS] = {0};
-    size_t candidate[FDB_MAX_COMPACTION_LEVELS] = {0};
+    uint64_t bytes[FASTDB_STORAGE_MAX_LEVELS] = {0};
+    uint64_t max_bytes[FASTDB_STORAGE_MAX_LEVELS] = {0};
+    size_t candidate[FASTDB_STORAGE_MAX_LEVELS] = {0};
     size_t level0_count = 0;
     max_bytes[1] = policy->level1_bytes;
     for (uint32_t i = 2; i < policy->levels; ++i) {
@@ -117,7 +112,7 @@ static size_t choose_source(const FDBManifest *manifest, const FDBCompactionPoli
         const FDBManifestEntry *file = &manifest->entries[i - 1];
         if (file->kind != FDB_FILE_SSTABLE || file->level == policy->levels - 1)
             continue;
-        bytes[file->level] = saturating_add(bytes[file->level], file->bytes);
+        bytes[file->level] = fdb_saturating_add_u64(bytes[file->level], file->bytes);
         if (file->level == 0)
             ++level0_count;
         if (in_range(file, range))

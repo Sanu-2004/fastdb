@@ -175,8 +175,13 @@ FastDBStatus fdb_wal_set_append(FDBWalSet *set, const FDBRecord *records, size_t
             return status;
     }
     status = fdb_wal_append(&set->wal, records, count, durable);
-    if (status == FASTDB_COMMIT_UNCERTAIN)
+    if (status == FASTDB_OK) {
+        FastDBStorageActivity *activity = &set->activity;
+        activity->wal_frame_bytes_appended =
+            fdb_saturating_add_u64(activity->wal_frame_bytes_appended, frame_bytes);
+    } else if (status == FASTDB_COMMIT_UNCERTAIN) {
         set->poisoned = true;
+    }
     return status;
 }
 

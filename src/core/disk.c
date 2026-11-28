@@ -390,6 +390,46 @@ void fdb_disk_cache_stats(const FDBDisk *disk, FastDBBlockCacheStats *out)
     fdb_block_cache_stats(disk == NULL ? NULL : disk->block_cache, out);
 }
 
+void fdb_disk_storage_stats(const FDBDisk *disk, FastDBStorageStats *out)
+{
+    if (disk == NULL)
+        return;
+    const FDBWalSet *set = &disk->log;
+    const FDBManifest *catalog = &set->catalog.view;
+    out->mode = disk->mode;
+    out->catalog_generation = catalog->generation;
+    out->level_count = disk->mode == FASTDB_MODE_LSM ? disk->policy.levels : 0;
+    out->compaction_workspace_bytes = disk->compaction_bytes;
+    out->activity = set->activity;
+    for (size_t i = 0; i < catalog->count; ++i) {
+        const FDBManifestEntry *entry = &catalog->entries[i];
+        switch (entry->kind) {
+        case FDB_FILE_WAL: {
+            uint64_t bytes = entry->bytes;
+            if (i == set->active_index) {
+                bytes = set->wal.offset;
+                out->active_wal_bytes = bytes;
+            }
+            ++out->wal_files;
+            out->wal_bytes = fdb_saturating_add_u64(out->wal_bytes, bytes);
+            break;
+        }
+        case FDB_FILE_SSTABLE: {
+            FastDBStorageLevelStats *level = &out->levels[entry->level];
+            ++level->files;
+            level->bytes = fdb_saturating_add_u64(level->bytes, entry->bytes);
+            ++out->sstable_files;
+            out->sstable_bytes = fdb_saturating_add_u64(out->sstable_bytes, entry->bytes);
+            break;
+        }
+        case FDB_FILE_CHECKPOINT:
+            ++out->checkpoint_files;
+            out->checkpoint_bytes = fdb_saturating_add_u64(out->checkpoint_bytes, entry->bytes);
+            break;
+        }
+    }
+}
+
 size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk)
 {
     return disk == NULL ? 0 : disk->arena_chunk_bytes;

@@ -9,6 +9,7 @@ typedef struct FDBWalSet {
     FDBManifestLimits catalog_limits;
     FDBManifestLoad catalog;
     FDBWal wal;
+    FastDBStorageActivity activity;
     size_t active_index;
     size_t corrupt_filter_partitions;
     size_t pinned_read_bytes;

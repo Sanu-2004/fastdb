@@ -3,8 +3,6 @@
 
 #include "manifest.h"
 
-enum { FDB_MAX_COMPACTION_LEVELS = 32 };
-
 typedef struct FDBCompactionPolicy {
     uint32_t levels;
     size_t level0_file_trigger;

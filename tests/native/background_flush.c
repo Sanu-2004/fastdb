@@ -522,6 +522,11 @@ static void close_drains_background_compaction(bool tiered)
     CHECK(db->flush->compaction_running);
     CHECK(pthread_mutex_unlock(&db->mutex) == 0);
 
+    FastDBStorageStats storage_stats;
+    OK(fastdb_storage_stats(db, &storage_stats));
+    CHECK(storage_stats.compaction_workspace_bytes != 0 && storage_stats.sstable_files == 3);
+    CHECK(storage_stats.activity.compaction_jobs_published == (tiered ? 0u : 1u));
+
     /* Keep an actual point-read descriptor open while the worker keeps its input streams. */
     CHECK(pthread_mutex_lock(&gate.mutex) == 0);
     gate.hold_reader = true;

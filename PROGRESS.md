@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-28\
-**Last verified base commit / branch:** `1028522` / `main`. V083 completes P4.6.
+**Last verified base commit / branch:** `e553cb3` / `main`. V084 verifies the storage metrics in P4.7.
 **Current milestone:** P4 — performance and configuration hardening.\
-**Next task:** P4.7 — native metrics and benchmark harness.
+**Next task:** P4.7 — native benchmark harness and remaining metrics.
 
 ## 1. How to use this file
 
@@ -118,7 +118,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | DONE | V078 verifies bounded v1 Bloom reads. V079 verifies v2 writer limits, root and leaf checks, a table above 2 MiB under 64 KiB reader workspace, revisions crossing leaves, and mixed v1/v2 compaction and reopen. [ADR 0011](docs/adr/0011-partitioned-sstable-indexes.md). |
 | P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | DONE | V080 and V081 verify both optional codecs, raw fallback, mixed compaction, checked decoding, cache and recovery memory accounting, expansion headroom, installed clients and Docker builds. |
 | P4.6 | Size-tiered compaction and validated storage profiles; consistent search semantics across overlapping runs. | DONE | V082 verifies all six native profiles. V083 verifies bounded size-tiered selection and split progress, revision-based reads, expiration and DELETE masks, snapshots, compatibility with leveled reopen, concurrent flush and crash recovery. [ADR 0012](docs/adr/0012-size-tiered-compaction.md). |
-| P4.7 | Native stats/metrics and benchmark harness; repeatable baseline measurements before optimization. | TODO | — |
+| P4.7 | Native stats/metrics and benchmark harness; repeatable baseline measurements before optimization. | IN_PROGRESS | V084 verifies the native storage inventory, memory gauges and WAL/flush/checkpoint/compaction activity. The benchmark driver, workload baselines, and remaining operation, sync and Bloom metrics are open. |
 | P4.8 | Runtime config introspection, live/reopen/migrate classification, low-memory and resource-limit tests. | TODO | — |
 
 **P4 exit gate:** Configurations are real, bounded and tested; performance improvements backed by measurements, not claims.
@@ -205,7 +205,7 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 covers 28 process-kill scenarios across flush, checkpoint and compaction. V083 adds nine tiered compaction boundaries. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | V073 covers a deterministic multilevel merge larger than the engine budget. P8.3 tracks release-scale concurrent stress, RSS and FD measurements. |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V083 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V084 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -306,6 +306,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V081 | 2026-11-28 / P4.5 Zstd based on `b6d81c6` | LZ4 baseline, test-first builds, all four GCC codec combinations, dual-codec Clang and sanitizer profiles, installed clients and Docker default/dual builds. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p45-zstd-and-mixed-codec-verification-v081). | PASS | Baseline 30/30. Red cases identified missing Zstd support and underestimated compaction expansion. Final full profiles and both Docker builds passed 30/30. TSan passed 35 executions. Both codecs verify raw fallback, integrity, configured memory bounds and mixed compaction. |
 | V082 | 2026-11-28 / P4.6 profiles based on `ef96580` | Test-first build, GCC Debug default/dual, Clang Release dual, ASan/UBSan with leak detection dual, repeated TSan and Docker dual Release. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p46-validated-native-storage-profiles-v082). | PASS | The test-first build found the missing preset API. All four full native profiles and Docker passed 31/31. TSan passed five profile executions and 35 concurrency executions. The Docker CLI reported `0.1.0`. |
 | V083 | 2026-11-28 / P4.6 tiered compaction based on `1028522` | Baseline, test-first planner build, focused native and fault suites, GCC Debug default/dual, Clang Release, ASan/UBSan with leak detection, repeated TSan and Docker Release. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p46-size-tiered-compaction-v083). | PASS | Baseline and all final full suites passed 31/31. TSan passed 38 executions. Verified fan-in, split progress, held reader during concurrent L0 publication, snapshot visibility, latest revisions and masks, leveled compatibility and nine new process-kill cases. |
+| V084 | 2026-11-28 / P4.7 storage metrics based on `e553cb3` | Test-first API build, storage statistics and worker suites, GCC Debug default/dual, Clang Release, ASan/UBSan with leak detection, repeated TSan, shared export and Docker Release. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md#p47-native-storage-metrics-v084). | PASS | Full suites passed 32/32. TSan passed 38 executions. Exact WAL and SSTable bytes, checkpoints, publication versus cleanup errors, poisoned handles and fresh counters at reopen passed. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -652,14 +653,20 @@ These are deliberate boundaries, not completed features:
 - The tiered planner groups by stored file size and caps per-job fan-in and per-call attempts. Outputs use L0 to preserve existing catalog compatibility. A successful job reduces the table count. An unproductive split returns a limit error with input references intact. The existing atomic publisher and snapshot pins cover both strategies.
 - V083 passed 31/31 across the full matrix. TSan passed 38 executions. Nine tiered crash boundaries and a detached merge with a pinned reader and concurrent flush passed. P4.6 is DONE.
 
+### Session 037 — 2026-11-28 — Add native storage metrics in P4.7
+
+- Started from pushed `e553cb3`. Added storage inventory and concurrency cases first. The red build failed on the missing stats type and entry point. Added an allocation-free stats snapshot under the database mutex without changing the existing stats structures.
+- Added WAL append and maintenance counters that advance on the actual successful append or durable publication. Verified they count a post-publication cleanup error separately from publication. Verified WAL, checkpoint and SSTable bytes against file lengths in disposable databases.
+- V084 passed 32/32 in GCC Debug with both codecs disabled and enabled, Clang Release, ASan/UBSan with leak detection and Docker Release. TSan passed 38 executions. P4.7 remains IN_PROGRESS.
+
 ## 9. Current handoff
 
 - **Current milestone:** P4 — performance and configuration hardening.
 - **Next task ID:** P4.7.
-- **Next action:** Add native storage metrics and use them in a repeatable benchmark harness.
-- **Next commands:** Add tests for a native storage stats snapshot across modes, WAL rotation, checkpoints, compaction and reopen. Keep the existing stats ABI and account for publications independently of cleanup outcomes. Add benchmark argument, workload and output checks before implementing the harness.
-- **Last verified good checkpoint:** V083 completes P4.6 on top of `1028522`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the test-first and final runs.
-- **Working-tree state:** V083 includes size-tiered compaction, regression tests and documentation. Confirm with `git status --short --branch`.
+- **Next action:** Implement the benchmark harness and record repeatable native baselines using the verified storage metrics.
+- **Next commands:** Add `tests/benchmark.sh` argument-rejection, workload-count, seeded-reproducibility and output-format cases before creating `benchmarks/main.c`. Run writes and reads against disposable engine directories. Use monotonic timing and bounded latency sampling, and separate load, warmup, measured operations, maintenance and reopen. Report configuration, throughput, percentiles, RSS, charged memory and stored-byte deltas using `fastdb_storage_stats`. Wire the binary into CMake, Docker and the Makefile and record measured runs in `docs/BENCHMARKS.md`. Add operation, sync and Bloom metrics with dedicated regression tests before closing P4.7.
+- **Last verified good checkpoint:** V084 storage metrics on top of `e553cb3`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the test-first and final runs.
+- **Working-tree state:** V084 includes the native storage snapshot, activity counters, tests and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Power-loss tests and release-scale verification remain open.
 

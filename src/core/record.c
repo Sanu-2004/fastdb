@@ -40,6 +40,11 @@ bool fdb_add_size(size_t a, size_t b, size_t *sum)
     return true;
 }
 
+uint64_t fdb_saturating_add_u64(uint64_t a, uint64_t b)
+{
+    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
 void fdb_encode_u32(unsigned char *out, uint32_t value)
 {
     for (unsigned int i = 0; i < 4; ++i)

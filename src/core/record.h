@@ -17,6 +17,7 @@ typedef struct FDBRecord {
 
 int fdb_compare(FastDBSlice a, FastDBSlice b);
 bool fdb_add_size(size_t a, size_t b, size_t *sum);
+uint64_t fdb_saturating_add_u64(uint64_t a, uint64_t b);
 FastDBStatus fdb_read_time(uint64_t *milliseconds);
 bool fdb_record_visible(FDBRecordKind kind, uint64_t expires_at_ms, uint64_t read_time);
 void fdb_encode_u32(unsigned char *out, uint32_t value);

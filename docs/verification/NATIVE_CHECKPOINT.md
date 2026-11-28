@@ -1659,6 +1659,60 @@ Docker Release build each passed 31/31. TSan used the V062 setup and
 passed 35 concurrency executions and three executions of the compaction
 target. The Docker version command printed `0.1.0`.
 
+## P4.7 native storage metrics (V084)
+
+At `e553cb3`, building the test-first target failed because
+`FastDBStorageStats` and `fastdb_storage_stats` did not exist. The
+new fixture covers memory-only gauges, persistent-memory checkpoint
+inventory, LSM WAL rotation and per-level inventory, and counter reset
+on reopen. It verifies 623 referenced WAL bytes after three 181-byte
+frames and two 40-byte segment headers, and compares live WAL, checkpoint,
+and table byte totals with filesystem file lengths. A failed rename
+leaves the old tables referenced. An injected unlink failure records
+both the published merge and its cleanup error while the inventory
+excludes physically retained files. A failed WAL sync clears stats on
+the poisoned handle. The worker fixture checks the workspace charge and
+current catalog while a detached compaction is paused.
+
+```sh
+cmake -S /repo -B /tmp/p47-storage-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p47-storage-red --target fastdb_storage_stats --parallel 6
+for variant in plain dual clang asan tsan; do
+  cc=gcc; build=Debug; codec=ON; sanitizer=none; linker=
+  case "$variant" in
+    plain) codec=OFF ;;
+    clang) cc=clang; build=Release ;;
+    asan) sanitizer=address; linker=-no-pie ;;
+    tsan) sanitizer=thread; linker=-no-pie ;;
+  esac
+  dir="/tmp/p47-storage-$variant"
+  CC="$cc" cmake -S /repo -B "$dir" -DCMAKE_BUILD_TYPE="$build" \
+    -DFASTDB_ENABLE_LZ4="$codec" -DFASTDB_ENABLE_ZSTD="$codec" \
+    -DFASTDB_SANITIZER="$sanitizer" -DCMAKE_EXE_LINKER_FLAGS="$linker"
+  cmake --build "$dir" --parallel 4
+  case "$variant" in
+    tsan)
+      setarch x86_64 -R ctest --test-dir "$dir" -L concurrency \
+        --repeat until-fail:5 --output-on-failure
+      setarch x86_64 -R ctest --test-dir "$dir" -R '^fastdb_storage_stats$' \
+        --repeat until-fail:3 --output-on-failure
+      ;;
+    *) ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$dir" --output-on-failure ;;
+  esac
+done
+nm -D --defined-only /tmp/p47-storage-dual/libfastdb.so | grep fastdb_storage_stats
+docker build --build-arg FASTDB_ENABLE_LZ4=ON --build-arg FASTDB_ENABLE_ZSTD=ON \
+  -t fastdb-native:p47-storage .
+docker run --rm --network none fastdb-native:p47-storage --version
+```
+
+The default and dual-codec GCC Debug, Clang Release, ASan/UBSan with
+leak detection and Docker Release suites each passed 32/32. TSan passed
+35 concurrency executions and three storage-stats executions using
+V062. The shared library exported the new symbol. The container version
+command printed `0.1.0`. These commands ran tests and verification
+measurements for the metrics. Benchmark workloads remain open.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

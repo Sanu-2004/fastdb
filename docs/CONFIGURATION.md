@@ -388,3 +388,28 @@ See [ADR 0012](adr/0012-size-tiered-compaction.md).
 Eviction is disabled by default. Workspace charges describe
 engine-requested allocations and reserved capacity. See
 [architecture](ARCHITECTURE.md) for the accounting boundary.
+
+### Native storage metrics
+
+`fastdb_storage_stats` captures memory gauges, referenced file inventory,
+and activity counters under the database mutex. It walks the bounded
+catalog without allocating memory or querying the filesystem. A poisoned
+handle returns `FASTDB_COMMIT_UNCERTAIN` and clears the output. The
+existing `fastdb_stats` and `fastdb_block_cache_stats` calls continue to
+serve their narrower views.
+
+| Fields | Meaning |
+|---|---|
+| `active_memtable_bytes`, `frozen_memtable_bytes`, `snapshot_bytes` | Charged memory for the trees and any snapshot. Active bytes include eviction metadata when configured |
+| `reserved_engine_bytes` | Charged capacity for persistent workspace or memory eviction state |
+| `compaction_workspace_bytes` | Additional engine charge visible during detached compaction. Serialized jobs hold the mutex until they finish |
+| `catalog_generation`, `wal_files`, `checkpoint_files`, `sstable_files` | Current catalog generation and counts of its referenced files |
+| `wal_bytes`, `active_wal_bytes`, `checkpoint_bytes`, `sstable_bytes`, `levels` | Stored bytes and per-level SSTable inventory. The open WAL contributes its current append offset. Counts exclude temporary files and retired files still awaiting reclamation |
+| `activity.wal_frame_bytes_appended` | Bytes in successful frame appends, including frame headers. Segment headers and replay are excluded. Durability still follows the selected WAL policy |
+| `activity.flush_files_published`, `activity.checkpoints_published`, `activity.compaction_jobs_published` | Successfully published tables, checkpoints, and merges. The counters advance at durable catalog publication |
+| `activity.flush_output_bytes`, `activity.checkpoint_output_bytes`, `activity.compaction_input_bytes`, `activity.compaction_output_bytes` | Stored bytes from the respective publications. Compaction input bytes are selected file sizes |
+| `activity.compaction_job_errors` | Errors from the compaction executor, including a cleanup error after a successful publication. Admission failures before the executor are outside this count |
+
+Activity counters reset on open and saturate on overflow. Disk inventory
+excludes manifest, lock and filesystem overhead. Use operating-system
+measurements for process RSS, allocated disk blocks, and physical I/O.

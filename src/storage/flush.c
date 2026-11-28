@@ -89,7 +89,7 @@ static FastDBStatus write_tree(FDBSSTWriter *writer, const FDBTree *tree, bool c
            fdb_sst_writer_finish(writer, props);
 }
 
-static FastDBStatus install_edit(FDBWalSet *set, FDBTree *tree, bool checkpoint,
+static FastDBStatus install_edit(FDBWalSet *set, FDBTree *tree, const FDBFlushOutput *output,
                                    FDBManifestLoad *next)
 {
     FastDBStatus status = fdb_manifest_publish(set->dir, &set->catalog_limits,
@@ -97,8 +97,18 @@ static FastDBStatus install_edit(FDBWalSet *set, FDBTree *tree, bool checkpoint,
     if (status != FASTDB_OK)
         return status;
 
+    FastDBStorageActivity *activity = &set->activity;
+    if (output->checkpoint) {
+        activity->checkpoints_published = fdb_saturating_add_u64(activity->checkpoints_published, 1);
+        activity->checkpoint_output_bytes =
+            fdb_saturating_add_u64(activity->checkpoint_output_bytes, output->properties.file_bytes);
+    } else {
+        activity->flush_files_published = fdb_saturating_add_u64(activity->flush_files_published, 1);
+        activity->flush_output_bytes =
+            fdb_saturating_add_u64(activity->flush_output_bytes, output->properties.file_bytes);
+    }
     status = fdb_wal_set_install_catalog(set, next);
-    if (!checkpoint)
+    if (!output->checkpoint)
         fdb_tree_destroy(tree);
     return status;
 }
@@ -180,7 +190,7 @@ FastDBStatus fdb_flush_commit(FDBWalSet *set, FDBTree *tree, const FDBFlushOutpu
     if (status == FASTDB_OK)
         status = fdb_dir_sync(set->dir);
     if (status == FASTDB_OK)
-        status = install_edit(set, tree, cut.checkpoint, &next);
+        status = install_edit(set, tree, output, &next);
     fdb_manifest_release(&next);
     if (status == FASTDB_COMMIT_UNCERTAIN)
         set->poisoned = true;

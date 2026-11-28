@@ -641,6 +641,25 @@ FastDBStatus fastdb_block_cache_stats(FastDB *db, FastDBBlockCacheStats *out)
     return status;
 }
 
+FastDBStatus fastdb_storage_stats(FastDB *db, FastDBStorageStats *out)
+{
+    if (db == NULL || out == NULL)
+        return FASTDB_INVALID_ARGUMENT;
+    pthread_mutex_lock(&db->mutex);
+    *out = (FastDBStorageStats){0};
+    FastDBStatus status = fdb_disk_poisoned(db->disk) ? FASTDB_COMMIT_UNCERTAIN : FASTDB_OK;
+    if (status == FASTDB_OK) {
+        out->active_memtable_bytes = live_tree_bytes(db);
+        if (db->flush != NULL)
+            out->frozen_memtable_bytes = fdb_tree_memory_bytes(&db->flush->frozen);
+        out->snapshot_bytes = db->snapshot_bytes;
+        out->reserved_engine_bytes = db->reserved_bytes;
+        fdb_disk_storage_stats(db->disk, out);
+    }
+    pthread_mutex_unlock(&db->mutex);
+    return status;
+}
+
 FastDBStatus fastdb_flush(FastDB *db)
 {
     if (db == NULL)

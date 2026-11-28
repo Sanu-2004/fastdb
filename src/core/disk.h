@@ -46,6 +46,7 @@ bool fdb_disk_has_tables(const FDBDisk *disk);
 FDBGroupCommit *fdb_disk_group_commit(const FDBDisk *disk);
 FastDBStatus fdb_disk_finish_group(FDBDisk *disk);
 void fdb_disk_cache_stats(const FDBDisk *disk, FastDBBlockCacheStats *out);
+void fdb_disk_storage_stats(const FDBDisk *disk, FastDBStorageStats *out);
 size_t fdb_disk_arena_chunk_bytes(const FDBDisk *disk);
 size_t fdb_disk_memtable_key_bytes(const FDBDisk *disk, bool frozen);
 void fdb_disk_set_active_key_bytes(FDBDisk *disk, size_t bytes);

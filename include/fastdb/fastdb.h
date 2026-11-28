@@ -155,6 +155,46 @@ typedef struct FastDBBlockCacheStats {
     size_t entries;
 } FastDBBlockCacheStats;
 
+enum { FASTDB_STORAGE_MAX_LEVELS = 32 };
+
+typedef struct FastDBStorageLevelStats {
+    size_t files;
+    uint64_t bytes;
+} FastDBStorageLevelStats;
+
+/* Cumulative per open handle. Byte totals saturate. */
+typedef struct FastDBStorageActivity {
+    uint64_t wal_frame_bytes_appended;
+    uint64_t flush_files_published;
+    uint64_t flush_output_bytes;
+    uint64_t checkpoints_published;
+    uint64_t checkpoint_output_bytes;
+    uint64_t compaction_jobs_published;
+    uint64_t compaction_job_errors;
+    uint64_t compaction_input_bytes;
+    uint64_t compaction_output_bytes;
+} FastDBStorageActivity;
+
+typedef struct FastDBStorageStats {
+    FastDBMode mode;
+    size_t active_memtable_bytes;
+    size_t frozen_memtable_bytes;
+    size_t snapshot_bytes;
+    size_t reserved_engine_bytes;
+    size_t compaction_workspace_bytes;
+    uint64_t catalog_generation;
+    size_t wal_files;
+    uint64_t wal_bytes;
+    uint64_t active_wal_bytes;
+    size_t checkpoint_files;
+    uint64_t checkpoint_bytes;
+    size_t sstable_files;
+    uint64_t sstable_bytes;
+    uint32_t level_count;
+    FastDBStorageLevelStats levels[FASTDB_STORAGE_MAX_LEVELS];
+    FastDBStorageActivity activity;
+} FastDBStorageStats;
+
 FASTDB_API const char *fastdb_version(void);
 FASTDB_API const char *fastdb_status_string(FastDBStatus status);
 FASTDB_API void fastdb_free(void *allocation);
@@ -205,6 +245,8 @@ FASTDB_API FastDBStatus fastdb_open(const FastDBOptions *options, FastDB **out);
 /* Quiesce operations before close. BUSY leaves the handle open. Other results consume it. */
 FASTDB_API FastDBStatus fastdb_close(FastDB *db);
 FASTDB_API FastDBStatus fastdb_stats(FastDB *db, FastDBStats *out);
+/* Capture charged storage memory, catalog inventory and maintenance activity under one lock. */
+FASTDB_API FastDBStatus fastdb_storage_stats(FastDB *db, FastDBStorageStats *out);
 /* Reports zero fields when the cache is disabled. Counters reset on open. */
 FASTDB_API FastDBStatus fastdb_block_cache_stats(FastDB *db, FastDBBlockCacheStats *out);
 FASTDB_API FastDBStatus fastdb_flush(FastDB *db);

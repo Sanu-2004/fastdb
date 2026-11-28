@@ -15,6 +15,8 @@ typedef struct Build {
     uint64_t output_begin;
     uint64_t next_output_id;
     uint64_t end_output_id;
+    uint64_t input_bytes;
+    uint64_t output_bytes;
 } Build;
 
 static FastDBStatus add_entry(Build *build, FDBManifestEntry entry)
@@ -46,12 +48,15 @@ static FastDBStatus finished(void *context, const char *temporary_name,
 {
     (void)temporary_name;
     Build *build = context;
-    return add_entry(build, (FDBManifestEntry){
+    FastDBStatus status = add_entry(build, (FDBManifestEntry){
         .id = props->id, .kind = FDB_FILE_SSTABLE, .bytes = props->file_bytes,
         .level = suffix ? build->plan->source_level : build->plan->destination_level,
         .sequence_begin = props->min_sequence, .sequence_end = props->max_sequence,
         .min_key = props->min_key, .max_key = props->max_key,
     });
+    if (status == FASTDB_OK)
+        build->output_bytes = fdb_saturating_add_u64(build->output_bytes, props->file_bytes);
+    return status;
 }
 
 static bool selected(uint64_t id, const uint64_t *input_ids, size_t count)
@@ -221,6 +226,7 @@ static FastDBStatus write_outputs(Build *build, const FDBCompactionPolicy *polic
         FDBSSTReader *reader;
         status = fdb_catalog_open_table(set->dir, entry, &limits.output_table, &reader);
         readers[i] = reader;
+        build->input_bytes = fdb_saturating_add_u64(build->input_bytes, entry->bytes);
     }
     if (status == FASTDB_OK) {
         const FDBMergeOutput output = {take_output_id, finished, build};
@@ -304,6 +310,12 @@ static FastDBStatus publish(Build *build, uint32_t levels, size_t outputs)
         status = fdb_manifest_publish(set->dir, &set->catalog_limits, generation, next);
     if (status != FASTDB_OK)
         return status;
+    FastDBStorageActivity *activity = &set->activity;
+    activity->compaction_jobs_published = fdb_saturating_add_u64(activity->compaction_jobs_published, 1);
+    activity->compaction_input_bytes = fdb_saturating_add_u64(activity->compaction_input_bytes,
+                                                            build->input_bytes);
+    activity->compaction_output_bytes = fdb_saturating_add_u64(activity->compaction_output_bytes,
+                                                             build->output_bytes);
     status = fdb_wal_set_install_catalog(set, &build->candidate);
     return status == FASTDB_OK ? fdb_storage_reclaim_orphans(set) : status;
 }
@@ -325,6 +337,8 @@ FastDBStatus fdb_compact_once(FDBWalSet *set, const FDBCompactionPolicy *policy,
         status = publish(&build, policy->levels, outputs);
     if (status == FASTDB_COMMIT_UNCERTAIN)
         set->poisoned = true;
+    if (status != FASTDB_OK)
+        set->activity.compaction_job_errors = fdb_saturating_add_u64(set->activity.compaction_job_errors, 1);
     fdb_manifest_release(&build.candidate);
     return status;
 }
