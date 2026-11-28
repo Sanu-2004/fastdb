@@ -137,6 +137,14 @@ void fastdb_limits_default(FastDBLimits *limits)
         *limits = defaults;
 }
 
+static FastDBOptions default_options(void)
+{
+    FastDBOptions options = {.limits = defaults};
+    fastdb_compaction_options_default(&options.compaction);
+    fastdb_group_commit_options_default(&options.group_commit);
+    return options;
+}
+
 FastDBStatus fastdb_options_create(FastDBOptions **out)
 {
     if (out == NULL)
@@ -144,9 +152,7 @@ FastDBStatus fastdb_options_create(FastDBOptions **out)
     *out = calloc(1, sizeof(**out));
     if (*out == NULL)
         return FASTDB_OUT_OF_MEMORY;
-    (*out)->limits = defaults;
-    fastdb_compaction_options_default(&(*out)->compaction);
-    fastdb_group_commit_options_default(&(*out)->group_commit);
+    **out = default_options();
     return FASTDB_OK;
 }
 
@@ -253,6 +259,70 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->sync_interval_ms = next.sync_interval_ms;
     options->group_commit = next.group_commit;
     return FASTDB_OK;
+}
+
+FastDBStatus fastdb_options_set_profile(FastDBOptions *options, FastDBStorageProfile profile,
+                                         FastDBMode mode, const char *path)
+{
+    if (options == NULL || (profile == FASTDB_PROFILE_CACHE && mode != FASTDB_MODE_MEMORY) ||
+        (profile != FASTDB_PROFILE_CACHE && mode != FASTDB_MODE_LSM &&
+         mode != FASTDB_MODE_MEMORY_PERSISTENT))
+        return FASTDB_INVALID_ARGUMENT;
+    enum { KIB = 1024, MIB = KIB * KIB };
+    FastDBOptions next = default_options();
+    next.mode = mode;
+    fastdb_persistent_options_default(&next.storage);
+    switch (profile) {
+    case FASTDB_PROFILE_CACHE:
+    case FASTDB_PROFILE_BALANCED:
+        break;
+    case FASTDB_PROFILE_READ_OPTIMIZED:
+        next.limits.max_memory_bytes = 128 * MIB;
+        if (mode == FASTDB_MODE_LSM) {
+            next.storage.bloom_bits_per_key = 14;
+            next.block_cache_bytes = 16 * MIB;
+        }
+        break;
+    case FASTDB_PROFILE_WRITE_OPTIMIZED:
+        next.limits.max_memory_bytes = 128 * MIB;
+        next.storage.durability = FASTDB_DURABILITY_GROUP_COMMIT;
+        next.storage.max_wal_segment_bytes = 128 * MIB;
+        if (mode == FASTDB_MODE_LSM) {
+            next.flush_threshold = 8 * MIB;
+            next.compaction.level0_file_trigger = 8;
+        }
+        break;
+    case FASTDB_PROFILE_DURABLE:
+        next.storage.min_free_bytes = 16 * MIB;
+        next.storage.max_wal_segment_bytes = 40 * MIB;
+        break;
+    case FASTDB_PROFILE_LOW_MEMORY:
+        next.limits = (FastDBLimits){
+            .max_key_bytes = 4 * KIB, .max_value_bytes = 256 * KIB, .max_memory_bytes = 16 * MIB,
+            .max_batch_operations = 1024, .max_batch_bytes = MIB, .max_scan_records = 1024,
+            .max_scan_bytes = MIB, .max_open_iterators = 4,
+        };
+        next.storage.max_wal_frame_bytes = MIB;
+        next.storage.max_wal_segment_bytes = 4 * MIB;
+        next.storage.target_block_bytes = 4 * KIB;
+        next.storage.max_index_bytes = 128 * KIB;
+        next.storage.max_filter_bytes = 32 * KIB;
+        next.storage.max_catalog_files = 64;
+        next.storage.max_catalog_bytes = 128 * KIB;
+        next.storage.max_open_files = 24;
+        next.compaction.max_merge_inputs = 2;
+        next.compaction.target_file_bytes = 2 * MIB;
+        break;
+    default:
+        return FASTDB_INVALID_ARGUMENT;
+    }
+    const FastDBPersistentOptions *settings = mode == FASTDB_MODE_MEMORY ? NULL : &next.storage;
+    FastDBStatus status = fastdb_options_set_storage(&next, mode, path, settings);
+    if (status == FASTDB_OK) {
+        free(options->path);
+        *options = next;
+    }
+    return status;
 }
 
 FastDBStatus fastdb_options_set_wal_interval(FastDBOptions *options, uint32_t milliseconds)

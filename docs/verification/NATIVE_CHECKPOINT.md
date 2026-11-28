@@ -1545,6 +1545,58 @@ docker run --rm --network none fastdb-native:p45-dual --version
 Both native Docker Release builds passed 30/30 and printed `0.1.0` in
 their runtime smoke checks.
 
+## P4.6 validated native storage profiles (V082)
+
+At `ef96580`, the new `fastdb_profiles` target failed to build because
+the native preset API and enum were absent. The implemented target
+exercises the shared C ABI. It opens the cache preset and all five
+persistent presets in each supported persistent mode. It checks mode
+and path validation, path ownership, rollback on an invalid preset,
+no cache persistence, acknowledged group writes and the LSM flush
+worker, actual block cache hits, low-memory rejection without advancing
+the revision, and data/revision survival across flush or checkpoint
+and reopen.
+
+```sh
+cmake -S /repo -B /tmp/p46-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p46-red --target fastdb_profiles --parallel 6
+for variant in plain dual clang asan; do
+  cc=gcc; build=Debug; lz4=ON; zstd=ON; sanitizer=none; linker=
+  case "$variant" in
+    plain) lz4=OFF; zstd=OFF ;;
+    clang) cc=clang; build=Release ;;
+    asan) sanitizer=address; linker=-no-pie ;;
+  esac
+  dir="/tmp/p46-profiles-$variant"
+  CC="$cc" cmake -S /repo -B "$dir" -DCMAKE_BUILD_TYPE="$build" \
+    -DFASTDB_ENABLE_LZ4="$lz4" -DFASTDB_ENABLE_ZSTD="$zstd" \
+    -DFASTDB_SANITIZER="$sanitizer" -DCMAKE_EXE_LINKER_FLAGS="$linker"
+  cmake --build "$dir" --parallel 4
+  ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$dir" -R fastdb_profiles --output-on-failure
+  ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$dir" --output-on-failure
+done
+```
+
+All four profiles passed the focused case and 31/31 full tests in
+`fastdb-local-toolchain:codecs`. The following TSan and Docker commands
+also passed. There were 40 TSan executions across the profile and seven
+concurrency targets. The Docker Release build passed 31/31 and the
+runtime version check printed `0.1.0`.
+
+```sh
+CC=gcc cmake -S /repo -B /tmp/p46-profiles-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFASTDB_ENABLE_LZ4=ON -DFASTDB_ENABLE_ZSTD=ON \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p46-profiles-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p46-profiles-tsan -R fastdb_profiles \
+  --repeat until-fail:5 --output-on-failure
+setarch x86_64 -R ctest --test-dir /tmp/p46-profiles-tsan -L concurrency \
+  --repeat until-fail:5 --output-on-failure
+docker build --build-arg FASTDB_ENABLE_LZ4=ON --build-arg FASTDB_ENABLE_ZSTD=ON \
+  -t fastdb-native:p46-profiles .
+docker run --rm --network none fastdb-native:p46-profiles --version
+```
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

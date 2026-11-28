@@ -26,6 +26,36 @@ byte budget returns `FASTDB_LIMIT_EXCEEDED`. Retrying with a smaller record
 count may help.
 A record larger than a whole page remains accessible through GET.
 
+### Storage profiles
+
+Call `fastdb_options_set_profile(options, profile, mode, path)` to apply a
+validated preset. A successful call replaces the option values and copies
+the path. An invalid selection leaves the previous values intact. Apply
+individual overrides after the preset, then open the database. Persistent
+modes still require an existing directory.
+
+| Profile | Compatible modes | Settings |
+|---|---|---|
+| `FASTDB_PROFILE_CACHE` | `memory` with a null path | 64 MiB engine cap, no persistence or implicit eviction |
+| `FASTDB_PROFILE_BALANCED` | `memory_persistent`, `lsm` | Default resource limits and synchronous WAL acknowledgments |
+| `FASTDB_PROFILE_READ_OPTIMIZED` | `memory_persistent`, `lsm` | 128 MiB engine cap and sync WAL. LSM also reserves a 16 MiB block cache and uses 14 Bloom bits per key |
+| `FASTDB_PROFILE_WRITE_OPTIMIZED` | `memory_persistent`, `lsm` | 128 MiB engine cap, durable group commit, 128 MiB WAL segments. LSM also starts a flush worker at 8 MiB and uses an eight-file L0 trigger |
+| `FASTDB_PROFILE_DURABLE` | `memory_persistent`, `lsm` | Sync WAL, 40 MiB WAL segments and 16 MiB minimum filesystem headroom |
+| `FASTDB_PROFILE_LOW_MEMORY` | `memory_persistent`, `lsm` | 16 MiB engine cap, 4 KiB keys, 256 KiB values, 1 MiB batch and scan caps, 24 descriptors, sync WAL. LSM limits merge fan-in to two |
+
+The low-memory preset also limits batches and scans to 1,024 operations
+or records, allows four scan iterators, chooses 4 KiB blocks, and caps
+WAL frames and segments at 1 MiB and 4 MiB. Table index and filter
+budgets are 128 KiB and 32 KiB. The catalog budget is 64 files and
+128 KiB. LSM compaction targets 2 MiB for output files.
+
+Presets apply at open and use the same format as manually configured
+options. Opening existing data with a smaller profile still requires the
+committed files and their workspace to fit the new limits. Changing the
+mode of existing data requires explicit migration.
+
+### Snapshot limits
+
 All storage modes allow one open snapshot per database. Capture returns
 `FASTDB_LIMIT_EXCEEDED` if the snapshot slot is occupied or if the copy
 would exceed remaining memory headroom. Snapshot bytes appear in

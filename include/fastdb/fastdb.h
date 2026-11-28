@@ -69,6 +69,15 @@ typedef enum FastDBMode {
     FASTDB_MODE_LSM = 2
 } FastDBMode;
 
+typedef enum FastDBStorageProfile {
+    FASTDB_PROFILE_CACHE = 0,
+    FASTDB_PROFILE_BALANCED = 1,
+    FASTDB_PROFILE_READ_OPTIMIZED = 2,
+    FASTDB_PROFILE_WRITE_OPTIMIZED = 3,
+    FASTDB_PROFILE_DURABLE = 4,
+    FASTDB_PROFILE_LOW_MEMORY = 5
+} FastDBStorageProfile;
+
 typedef enum FastDBEvictionPolicy {
     FASTDB_EVICTION_NONE = 0,
     FASTDB_EVICTION_FIFO = 1,
@@ -161,6 +170,9 @@ FASTDB_API FastDBStatus fastdb_options_set_eviction(FastDBOptions *options,
 FASTDB_API FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
                                                    const char *path,
                                                    const FastDBPersistentOptions *settings);
+/* Replace options with a validated preset. Apply overrides afterward. */
+FASTDB_API FastDBStatus fastdb_options_set_profile(FastDBOptions *options, FastDBStorageProfile profile,
+                                                   FastDBMode mode, const char *path);
 /* Persistent modes only. Enable v2 partitioned output on the next open. */
 FASTDB_API FastDBStatus fastdb_options_set_partitioned_sstables(FastDBOptions *options, bool enabled);
 /* Optional codecs require a codec-enabled build and select v2 for new output. */
