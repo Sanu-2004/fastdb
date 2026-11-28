@@ -7,7 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static const FDBSSTLimits limits = {20, 100, 80, 160, 256, 0, 0, false};
+static const FDBSSTLimits limits = {20, 100, 80, 160, 256, 0, 0, false, 0};
 
 static FDBFsFault inject(void *context, FDBFsOp operation, size_t requested)
 {

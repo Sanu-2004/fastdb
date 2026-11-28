@@ -198,6 +198,28 @@ the table at a key boundary during compaction. A key group that cannot
 fit in one table returns `FASTDB_LIMIT_EXCEEDED`. Memtable admission uses
 conservative leaf and directory bounds so flush and replay have room.
 
+### Optional SSTable compression
+
+Build with `-DFASTDB_ENABLE_LZ4=ON` and `liblz4` 1.9.4 or newer. The
+CMake build uses `pkg-config` to locate the library. The native image can
+enable it with `docker build --build-arg FASTDB_ENABLE_LZ4=ON .`. Both
+build options default to off.
+
+In either persistent mode, select `FASTDB_COMPRESSION_LZ4` with
+`fastdb_options_set_sstable_compression` before opening the database.
+This enables v2 for new output. `FASTDB_COMPRESSION_NONE` selects
+uncompressed output while preserving the selected table version. The
+option applies on reopen. Reader codec selection follows each file.
+A codec-disabled build returns `FASTDB_UNSUPPORTED` for LZ4 options and
+files that declare LZ4.
+
+The writer budgets its compression state and output buffer. The enabled
+build reserves the bounded decode margin for readers so mixed files
+share the same admission rules. A block stays raw unless compression
+saves at least about one eighth of its size. Cache bytes reflect the
+decoded block size. See [the format specification](FILE_FORMAT.md) for
+the envelope and integrity checks.
+
 Persistent memory needs five slots during WAL rotation for the directory,
 lock, current WAL, replacement WAL, and temporary manifest. Increase any
 previous persistent-memory setting of 4 to at least 5 before reopening.

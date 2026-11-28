@@ -169,3 +169,19 @@ coverage, then verifies each leaf before using its block offsets and
 Bloom filters. The root and leaves order their last keys in
 nondecreasing unsigned byte order. Lower-bound searches and sequential
 advance preserve older revisions across leaf boundaries.
+
+### LZ4 blocks in v2
+
+The v2 properties codec field is zero for plain files and one for LZ4.
+A file that declares LZ4 may contain ordinary raw blocks and compressed
+blocks. A compressed block begins with the four-byte `LZ4B` magic,
+followed by four-byte decoded length, four-byte compressed payload
+length, and four-byte CRC32C of the payload. The payload contains the
+LZ4 block encoding of the complete ordinary FastDB block, including its
+header, records, row offsets, and inner CRC. The sparse index records
+the stored envelope and payload length.
+
+The reader checks both lengths, the outer checksum, exact decoder output
+size, and the decoded block checks before admitting it to the cache.
+The codec is selected from each file. A build without LZ4 returns
+`FASTDB_UNSUPPORTED` when a file declares it. V1 tables remain plain.

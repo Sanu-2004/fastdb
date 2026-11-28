@@ -14,6 +14,7 @@ typedef struct FDBSSTLimits {
     size_t max_filter_bytes;
     unsigned int bloom_bits_per_key;
     bool partitioned;
+    uint8_t codec;
 } FDBSSTLimits;
 
 typedef struct FDBSSTProperties {

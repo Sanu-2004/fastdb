@@ -1,4 +1,5 @@
 #include "disk.h"
+#include "block_codec.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -205,6 +206,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         options->arena_chunk_bytes = 0;
         options->block_cache_bytes = 0;
         options->partitioned_sstables = false;
+        options->sstable_codec = FASTDB_COMPRESSION_NONE;
         options->sync_interval_ms = 0;
         fastdb_group_commit_options_default(&options->group_commit);
         fastdb_compaction_options_default(&options->compaction);
@@ -221,6 +223,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
         next.arena_chunk_bytes = 0;
         next.block_cache_bytes = 0;
         next.partitioned_sstables = false;
+        next.sstable_codec = FASTDB_COMPRESSION_NONE;
         next.sync_interval_ms = 0;
     }
     if (settings == NULL)
@@ -246,6 +249,7 @@ FastDBStatus fastdb_options_set_storage(FastDBOptions *options, FastDBMode mode,
     options->arena_chunk_bytes = next.arena_chunk_bytes;
     options->block_cache_bytes = next.block_cache_bytes;
     options->partitioned_sstables = next.partitioned_sstables;
+    options->sstable_codec = next.sstable_codec;
     options->sync_interval_ms = next.sync_interval_ms;
     options->group_commit = next.group_commit;
     return FASTDB_OK;
@@ -269,6 +273,26 @@ FastDBStatus fastdb_options_set_partitioned_sstables(FastDBOptions *options, boo
     FastDBStatus status = fdb_disk_validate(&next);
     if (status == FASTDB_OK)
         options->partitioned_sstables = enabled;
+    return status;
+}
+
+FastDBStatus fastdb_options_set_sstable_compression(FastDBOptions *options,
+                                                     FastDBCompression compression)
+{
+    if (options == NULL || options->path == NULL ||
+        (compression != FASTDB_COMPRESSION_NONE && compression != FASTDB_COMPRESSION_LZ4))
+        return FASTDB_INVALID_ARGUMENT;
+    if (!fdb_block_codec_supported((uint32_t)compression))
+        return FASTDB_UNSUPPORTED;
+    FastDBOptions next = *options;
+    next.sstable_codec = (uint8_t)compression;
+    if (compression != FASTDB_COMPRESSION_NONE)
+        next.partitioned_sstables = true;
+    FastDBStatus status = fdb_disk_validate(&next);
+    if (status == FASTDB_OK) {
+        options->sstable_codec = next.sstable_codec;
+        options->partitioned_sstables = next.partitioned_sstables;
+    }
     return status;
 }
 

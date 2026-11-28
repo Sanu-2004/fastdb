@@ -116,7 +116,7 @@ static FastDBStatus settings(const FastDBOptions *options, FDBDisk *disk, size_t
     disk->table = (FDBSSTLimits){
         limits->max_key_bytes, limits->max_value_bytes, storage->target_block_bytes, block,
         storage->max_index_bytes, storage->max_filter_bytes, storage->bloom_bits_per_key,
-        options->partitioned_sstables,
+        options->partitioned_sstables, options->sstable_codec,
     };
     disk->compaction = options->compaction;
     disk->policy = (FDBCompactionPolicy){

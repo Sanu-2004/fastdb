@@ -5,6 +5,11 @@ include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 find_package(Threads REQUIRED)
+option(FASTDB_ENABLE_LZ4 "Support LZ4-compressed SSTable blocks" OFF)
+if(FASTDB_ENABLE_LZ4)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FASTDB_LZ4 REQUIRED IMPORTED_TARGET liblz4>=1.9.4)
+endif()
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -16,6 +21,9 @@ add_library(fastdb_build_flags INTERFACE)
 target_compile_definitions(fastdb_build_flags INTERFACE
     _POSIX_C_SOURCE=200809L _FILE_OFFSET_BITS=64
     FASTDB_VERSION_STRING="${PROJECT_VERSION}")
+if(FASTDB_ENABLE_LZ4)
+    target_compile_definitions(fastdb_build_flags INTERFACE FASTDB_HAVE_LZ4=1)
+endif()
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(fastdb_build_flags INTERFACE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
@@ -36,7 +44,7 @@ endif()
 add_library(fastdb_objects OBJECT
     src/core/disk.c src/core/engine.c src/core/memtable.c src/core/record.c src/core/scan.c
     src/core/snapshot.c src/core/group_commit.c src/core/interval_sync.c src/core/monotonic.c
-    src/storage/block_cache.c src/storage/bloom.c src/storage/compaction.c
+    src/storage/block_cache.c src/storage/block_codec.c src/storage/bloom.c src/storage/compaction.c
     src/storage/compaction_plan.c src/storage/crc32c.c
     src/storage/flush.c src/storage/fs.c
     src/storage/manifest.c src/storage/merge.c src/storage/merge_output.c
@@ -62,6 +70,11 @@ set_target_properties(fastdb_shared PROPERTIES EXPORT_NAME shared
     VERSION ${PROJECT_VERSION} SOVERSION 1)
 target_link_libraries(fastdb_static PUBLIC Threads::Threads)
 target_link_libraries(fastdb_shared PRIVATE Threads::Threads $<BUILD_INTERFACE:fastdb_build_flags>)
+if(FASTDB_ENABLE_LZ4)
+    target_link_libraries(fastdb_objects PRIVATE PkgConfig::FASTDB_LZ4)
+    target_link_libraries(fastdb_static PRIVATE PkgConfig::FASTDB_LZ4)
+    target_link_libraries(fastdb_shared PRIVATE PkgConfig::FASTDB_LZ4)
+endif()
 target_link_options(fastdb_static INTERFACE "$<BUILD_INTERFACE:${fastdb_sanitize_flags}>")
 
 add_executable(fastdb-cli cli/main.c)

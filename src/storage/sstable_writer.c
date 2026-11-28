@@ -1,4 +1,5 @@
 #include "sstable_format.h"
+#include "block_codec.h"
 #include "bloom.h"
 #include "crc32c.h"
 
@@ -14,6 +15,7 @@ struct FDBSSTWriter {
     uint64_t offset;
     uint64_t previous_sequence;
     unsigned char *block;
+    void *codec_workspace;
     uint32_t *row_offsets;
     size_t row_count;
     size_t record_bytes;
@@ -45,6 +47,8 @@ bool fdb_sst_valid_limits(const FDBSSTLimits *limits)
            leaf_capacity(limits) >= SST_INDEX_HEADER_BYTES + SST_MIN_INDEX_ENTRY_BYTES + SST_CRC_BYTES &&
            limits->max_index_bytes <= UINT32_MAX && limits->max_filter_bytes <= UINT32_MAX &&
            limits->bloom_bits_per_key <= FDB_BLOOM_MAX_BITS_PER_KEY &&
+           fdb_block_codec_supported(limits->codec) &&
+           (limits->codec == FASTDB_COMPRESSION_NONE || limits->partitioned) &&
            (limits->bloom_bits_per_key == 0 ||
             limits->max_filter_bytes >= FDB_BLOOM_MIN_IMAGE_BYTES);
 }
@@ -52,9 +56,12 @@ bool fdb_sst_valid_limits(const FDBSSTLimits *limits)
 bool fdb_sst_writer_budget(const FDBSSTLimits *limits, size_t *bytes)
 {
     size_t keys = limits->max_key_bytes;
+    size_t codec;
     size_t offsets = limits->max_block_bytes / SST_MIN_ROW_BYTES * sizeof(uint32_t);
     *bytes = sizeof(FDBSSTWriter) + SST_PROPERTIES_HEADER_BYTES + SST_CRC_BYTES;
-    return fdb_add_size(*bytes, limits->max_block_bytes, bytes) &&
+    return fdb_block_encode_workspace(limits->codec, limits->max_block_bytes, &codec) &&
+           fdb_add_size(*bytes, codec, bytes) &&
+           fdb_add_size(*bytes, limits->max_block_bytes, bytes) &&
            fdb_add_size(*bytes, offsets, bytes) &&
            fdb_add_size(*bytes, limits->max_index_bytes, bytes) &&
            fdb_add_size(*bytes, limits->max_filter_bytes, bytes) &&
@@ -114,6 +121,7 @@ FastDBStatus fdb_sst_writer_destroy(FDBSSTWriter *writer)
             status = close_status;
     }
     free(writer->block);
+    free(writer->codec_workspace);
     free(writer->row_offsets);
     free(writer->index);
     free(writer->directory);
@@ -129,6 +137,11 @@ static bool allocate_buffers(FDBSSTWriter *writer)
     size_t row_capacity = writer->limits.max_block_bytes / SST_MIN_ROW_BYTES;
     writer->row_offsets = malloc(row_capacity * sizeof(*writer->row_offsets));
     writer->block = malloc(writer->limits.max_block_bytes);
+    size_t codec;
+    if (!fdb_block_encode_workspace(writer->limits.codec, writer->limits.max_block_bytes, &codec))
+        return false;
+    if (codec != 0)
+        writer->codec_workspace = malloc(codec);
     size_t capacity = leaf_capacity(&writer->limits);
     writer->index = malloc(capacity);
     if (writer->limits.partitioned)
@@ -138,6 +151,7 @@ static bool allocate_buffers(FDBSSTWriter *writer)
     writer->min_key = malloc(writer->limits.max_key_bytes);
     writer->max_key = malloc(writer->limits.max_key_bytes);
     return writer->row_offsets != NULL && writer->block != NULL && writer->index != NULL &&
+           (codec == 0 || writer->codec_workspace != NULL) &&
            (!writer->limits.partitioned || writer->directory != NULL) &&
            (writer->limits.bloom_bits_per_key == 0 || writer->filters != NULL) &&
            writer->min_key != NULL && writer->max_key != NULL;
@@ -246,8 +260,14 @@ static FastDBStatus flush_block(FDBSSTWriter *writer)
     fdb_encode_u32(block + 12, fdb_crc32c(block + SST_BLOCK_HEADER_BYTES,
                                          size - SST_BLOCK_HEADER_BYTES));
 
+    const unsigned char *stored = block;
+    if (writer->codec_workspace != NULL) {
+        size_t compressed = fdb_block_lz4_encode(block, size, writer->codec_workspace, &stored);
+        if (compressed != 0)
+            size = compressed;
+    }
     uint64_t offset = writer->offset;
-    FastDBStatus status = append_bytes(writer, block, size);
+    FastDBStatus status = append_bytes(writer, stored, size);
     if (status != FASTDB_OK)
         return status;
     unsigned char *entry = writer->index + writer->index_bytes;
@@ -416,7 +436,7 @@ FastDBStatus fdb_sst_writer_add(FDBSSTWriter *writer, const FDBRecord *record)
     return FASTDB_OK;
 }
 
-static size_t write_properties(unsigned char *bytes, const FDBSSTProperties *properties)
+static size_t write_properties(unsigned char *bytes, const FDBSSTProperties *properties, uint8_t codec)
 {
     fdb_encode_u32(bytes, (uint32_t)properties->min_key.size);
     fdb_encode_u32(bytes + 4, (uint32_t)properties->max_key.size);
@@ -424,7 +444,7 @@ static size_t write_properties(unsigned char *bytes, const FDBSSTProperties *pro
     fdb_encode_u64(bytes + 16, properties->tombstones);
     fdb_encode_u64(bytes + 24, properties->min_sequence);
     fdb_encode_u64(bytes + 32, properties->max_sequence);
-    fdb_encode_u32(bytes + 40, 0);
+    fdb_encode_u32(bytes + 40, codec);
     fdb_encode_u32(bytes + 44, 0);
     if (properties->min_key.size != 0)
         memcpy(bytes + SST_PROPERTIES_HEADER_BYTES,
@@ -460,7 +480,7 @@ static FastDBStatus finish_image(FDBSSTWriter *writer, unsigned char *properties
     if (status != FASTDB_OK)
         return status;
     uint64_t properties_offset = writer->offset;
-    size_t properties_size = write_properties(properties, &writer->properties);
+    size_t properties_size = write_properties(properties, &writer->properties, writer->limits.codec);
     status = append_bytes(writer, properties, properties_size);
     if (status != FASTDB_OK)
         return status;

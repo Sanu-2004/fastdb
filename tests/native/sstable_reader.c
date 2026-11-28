@@ -8,7 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static const FDBSSTLimits limits = {16, 64, 82, 128, 512, 0, 0, false};
+static const FDBSSTLimits limits = {16, 64, 82, 128, 512, 0, 0, false, 0};
 
 static FDBFsFault inject(void *context, FDBFsOp operation, size_t requested)
 {
@@ -456,7 +456,7 @@ static void partitioned_index(const FDBDirectory *dir)
 static void large_partitioned_table(const FDBDirectory *dir)
 {
     enum { ROWS = 2048 };
-    const FDBSSTLimits write = {16, 1024, 512, 2048, 8192, 256, 10, true};
+    const FDBSSTLimits write = {16, 1024, 512, 2048, 8192, 256, 10, true, 0};
     FDBSSTWriter *writer;
     OK(fdb_sst_writer_open(dir, "large", 44, &write, &writer));
     unsigned char value[1024] = {0}, key[2];

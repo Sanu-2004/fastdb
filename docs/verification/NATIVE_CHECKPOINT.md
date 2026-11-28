@@ -1414,6 +1414,63 @@ times each. A temporary Docker test image derived from
 `fastdb-local-toolchain:bookworm` installed `liblz4-dev` 1.9.4-1 and
 `pkg-config` for the next task.
 
+## P4.5 optional LZ4 SSTable blocks (V080)
+
+At `f970678`, the test-first target failed on the missing compression enum.
+With LZ4 enabled, the new target checks an encoded repeated payload, a raw
+fallback block with deterministic pseudorandom data, decoded cache byte
+charges and both cache hits. Checksum corruption and a malformed payload
+with a valid checksum return `FASTDB_CORRUPTION`. A decoded length over
+the configured cap returns `FASTDB_LIMIT_EXCEEDED`. A codec-disabled build
+rejects selecting LZ4 and opening a table that declares it. The public
+compaction test mixes plain v1 and compressed v2 inputs and reopens after
+selecting plain output again.
+
+```sh
+cmake -S /repo -B /tmp/p45-red -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/p45-red --target fastdb_sstable_codec --parallel 6
+CC=gcc cmake -S /repo -B /tmp/p45-final-off -DCMAKE_BUILD_TYPE=Debug -DFASTDB_ENABLE_LZ4=OFF
+cmake --build /tmp/p45-final-off --parallel 6
+ctest --test-dir /tmp/p45-final-off --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p45-final-gcc -DCMAKE_BUILD_TYPE=Debug -DFASTDB_ENABLE_LZ4=ON
+cmake --build /tmp/p45-final-gcc --parallel 6
+ctest --test-dir /tmp/p45-final-gcc -R '^fastdb_sstable_codec$' --repeat until-fail:5 --output-on-failure
+ctest --test-dir /tmp/p45-final-gcc --output-on-failure
+cmake --install /tmp/p45-final-gcc --prefix /tmp/p45-install
+cmake -S /repo/examples/c -B /tmp/p45-consumer -DCMAKE_PREFIX_PATH=/tmp/p45-install
+cmake --build /tmp/p45-consumer --parallel 6
+/tmp/p45-consumer/fastdb-example-static
+/tmp/p45-consumer/fastdb-example-shared
+CC=clang cmake -S /repo -B /tmp/p45-final-clang -DCMAKE_BUILD_TYPE=Release -DFASTDB_ENABLE_LZ4=ON
+cmake --build /tmp/p45-final-clang --parallel 6
+ctest --test-dir /tmp/p45-final-clang --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p45-final-asan -DCMAKE_BUILD_TYPE=Debug -DFASTDB_ENABLE_LZ4=ON \
+  -DFASTDB_SANITIZER=address -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p45-final-asan --parallel 6
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir /tmp/p45-final-asan --output-on-failure
+CC=gcc cmake -S /repo -B /tmp/p45-final-tsan -DCMAKE_BUILD_TYPE=Debug -DFASTDB_ENABLE_LZ4=ON \
+  -DFASTDB_SANITIZER=thread -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+cmake --build /tmp/p45-final-tsan --parallel 6
+setarch x86_64 -R ctest --test-dir /tmp/p45-final-tsan -L concurrency --repeat until-fail:5 --output-on-failure
+```
+
+The CMake profiles ran in `fastdb-local-toolchain:lz4` with LZ4 1.9.4.
+The focused codec test passed five final executions. The disabled and
+enabled GCC Debug profiles and enabled Clang Release and ASan/UBSan with
+leak detection passed 30/30 each. Both installed consumers printed `hello`.
+Seven TSan targets passed five times each. The Debian LZ4 library itself
+was not sanitizer-instrumented.
+
+```sh
+docker build -t fastdb-native:local .
+docker build --build-arg FASTDB_ENABLE_LZ4=ON -t fastdb-native:lz4-local .
+docker run --rm --network none fastdb-native:local --version
+docker run --rm --network none fastdb-native:lz4-local --version
+```
+
+The two Docker Release suites passed 30/30 each and both runtime smoke
+commands printed `0.1.0`.
+
 ## P3.8 completion with retained catalog and merged scans (V068)
 
 The new snapshot scan tests were added first. Building the new

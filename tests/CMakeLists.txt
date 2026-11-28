@@ -31,6 +31,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     fastdb_test(fastdb_sstable_reader native/sstable_reader.c fastdb_static "integration;fault;concurrency")
     target_include_directories(fastdb_sstable_reader PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
         "${PROJECT_SOURCE_DIR}/src/storage")
+    fastdb_test(fastdb_sstable_codec native/sstable_codec.c fastdb_static "integration;fault")
+    target_include_directories(fastdb_sstable_codec PRIVATE "${PROJECT_SOURCE_DIR}/src/core"
+        "${PROJECT_SOURCE_DIR}/src/storage")
     fastdb_test(fastdb_block_cache native/block_cache.c fastdb_static "unit;fault")
     target_include_directories(fastdb_block_cache PRIVATE "${PROJECT_SOURCE_DIR}/src/storage")
     target_link_options(fastdb_block_cache PRIVATE -Wl,--wrap=malloc)

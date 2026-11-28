@@ -2,4 +2,8 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+if(@FASTDB_ENABLE_LZ4@)
+    find_dependency(PkgConfig)
+    pkg_check_modules(FASTDB_LZ4 REQUIRED IMPORTED_TARGET liblz4>=1.9.4)
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/FastDBTargets.cmake")

@@ -12,6 +12,7 @@ struct FDBCachedBlock {
     uint64_t file;
     uint64_t offset;
     size_t size;
+    size_t stored_size;
     size_t pins;
     unsigned char data[];
 };
@@ -134,7 +135,7 @@ FDBCachedBlock *fdb_block_cache_acquire(FDBBlockCache *cache, uint64_t file, uin
 {
     pthread_mutex_lock(&cache->mutex);
     FDBCachedBlock *block = *find_link(cache, file, offset);
-    if (block == NULL || block->size != size || block->pins == SIZE_MAX) {
+    if (block == NULL || block->stored_size != size || block->pins == SIZE_MAX) {
         increment(&cache->stats.misses);
         block = NULL;
     } else {
@@ -151,6 +152,11 @@ FDBCachedBlock *fdb_block_cache_acquire(FDBBlockCache *cache, uint64_t file, uin
 const unsigned char *fdb_cached_block_data(const FDBCachedBlock *block)
 {
     return block->data;
+}
+
+size_t fdb_cached_block_size(const FDBCachedBlock *block)
+{
+    return block->size;
 }
 
 void fdb_block_cache_release(FDBBlockCache *cache, FDBCachedBlock *block)
@@ -174,7 +180,7 @@ static void evict(FDBBlockCache *cache, FDBCachedBlock *block)
 }
 
 static void insert(FDBBlockCache *cache, uint64_t file, uint64_t offset,
-                   const unsigned char *data, size_t size)
+                   const unsigned char *data, size_t size, size_t stored_size)
 {
     size_t available = cache->stats.max_bytes - cache->fixed_bytes - cache->pinned_bytes;
     if (available < sizeof(FDBCachedBlock) || size > available - sizeof(FDBCachedBlock) ||
@@ -193,7 +199,8 @@ static void insert(FDBBlockCache *cache, uint64_t file, uint64_t offset,
     if (block == NULL)
         return;
     FDBCachedBlock **chain = bucket(cache, file, offset);
-    *block = (FDBCachedBlock){.hash_next = *chain, .file = file, .offset = offset, .size = size};
+    *block = (FDBCachedBlock){.hash_next = *chain, .file = file, .offset = offset,
+                              .size = size, .stored_size = stored_size};
     memcpy(block->data, data, size);
     *chain = block;
     append_newest(cache, block);
@@ -202,10 +209,10 @@ static void insert(FDBBlockCache *cache, uint64_t file, uint64_t offset,
 }
 
 void fdb_block_cache_store(FDBBlockCache *cache, uint64_t file, uint64_t offset,
-                           const unsigned char *data, size_t size)
+                           const unsigned char *data, size_t size, size_t stored_size)
 {
     pthread_mutex_lock(&cache->mutex);
-    insert(cache, file, offset, data, size);
+    insert(cache, file, offset, data, size, stored_size);
     pthread_mutex_unlock(&cache->mutex);
 }
 

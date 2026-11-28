@@ -5,9 +5,9 @@
 **Initial state:** Prepared from a source review of the original repository; no agent implementation or runtime verification has been performed by the author of this ledger. The current checkout may differ.  
 **Release status:** NOT VERIFIED — not approved for production use.  
 **Last updated:** 2026-11-28\
-**Last verified base commit / branch:** `f1e3b7e` / `main`. V079 completes P4.4.
+**Last verified base commit / branch:** `f970678` / `main`. V080 verifies LZ4 in P4.5.
 **Current milestone:** P4 — performance and configuration hardening.\
-**Next task:** P4.5 — optional SSTable block compression.
+**Next task:** P4.5 — optional Zstd SSTable block compression.
 
 ## 1. How to use this file
 
@@ -116,7 +116,7 @@ Dependencies are expressed by milestone ordering plus explicit IDs when critical
 | P4.2 | Thread-safe bounded LRU block cache, file ID/offset keys, pinned-block lifetime, metrics. | DONE | V075 verifies the opt-in per-database cache, byte cap, LRU eviction, iterator pins, fault bypass, corruption rejection, file-ID isolation through compaction, concurrent hits and stats. See [ADR 0010](docs/adr/0010-bounded-sstable-block-cache.md). |
 | P4.3 | Group commit and interval sync worker; durable ACK ordering and sync-failure tests. | DONE | V076 verifies interval sync. V077 verifies one group sync for concurrent PUT/CAS/batch in both persistent modes, no early acknowledgement or live visibility, bounded count and bytes, rotation, failure outcomes, expiry purge and process-kill recovery. |
 | P4.4 | Partitioned/hierarchical indexes and filters; bounded construction and lookup across large SSTables. | DONE | V078 verifies bounded v1 Bloom reads. V079 verifies v2 writer limits, root and leaf checks, a table above 2 MiB under 64 KiB reader workspace, revisions crossing leaves, and mixed v1/v2 compaction and reopen. [ADR 0011](docs/adr/0011-partitioned-sstable-indexes.md). |
-| P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | TODO | — |
+| P4.5 | Optional LZ4/Zstd codecs, encoded per file; mixed-format/corruption tests. | IN_PROGRESS | V080 verifies optional LZ4, raw fallback, mixed-file compaction, checked decoding, cache accounting, installed clients and Docker builds. Zstd remains open. |
 | P4.6 | Size-tiered compaction and validated storage profiles; consistent search semantics across overlapping runs. | TODO | — |
 | P4.7 | Native stats/metrics and benchmark harness; repeatable baseline measurements before optimization. | TODO | — |
 | P4.8 | Runtime config introspection, live/reopen/migrate classification, low-memory and resource-limit tests. | TODO | — |
@@ -199,13 +199,13 @@ Gate status is independent of individual task status. PASS requires actual recor
 | G01 | Reproducible GCC + Clang build, C API/CLI and warnings check | PASS | V023, V041 |
 | G02 | Native memory CRUD, binary values and mode isolation/no accidental persistence | PASS | V019–V021. V074 revalidates the 512-byte memory fixture after adding the LSM allocator. |
 | G03 | Persistent-memory checkpoint and reopen; LSM WAL replay and sequence recovery | PASS | V019–V021. V076–V077 revalidate WAL reopen and revisions with interval and group commit. |
-| G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021, V075, and V078–V079. V079 adds root/leaf corruption checks, Bloom fallback, and mixed-format integration. |
+| G04 | SSTable block/index/filter correctness and corrupt input safety | PASS | V019–V021, V075, and V078–V080. V079 validates directory and leaves. V080 checks corrupt LZ4 payloads and lengths, codec-disabled behavior and mixed compaction. |
 | G05 | Multi-level streaming compaction, latest sequence, safe tombstones/TTL, reopen | PASS | V026–V028, V069 and V071 cover streaming compaction, snapshot visibility, TTL/tombstone masking and reopen. V072 adds safe DELETE reclamation, non-resurrection, and WAL coverage checks. |
 | G06 | Atomic batches/CAS/snapshots/scans, concurrent read/write correctness | PASS | V067–V068 cover complete batches, CAS, memory and LSM snapshots, merged scans and concurrent snapshot/maintenance fixtures. Release stress remains in G08/G09. |
 | G07 | Fault injection and process-kill recovery; acknowledged durable state retained | PASS | V041 for current native paths. 28 process-kill scenarios across flush, checkpoint and compaction. |
 | G08 | 1M-operation differential run with seed and reference model | NOT RUN | — |
 | G09 | Concurrent stress, backpressure, measured large-dataset bounded-memory merge | NOT RUN | V073 covers a deterministic multilevel merge larger than the engine budget. P8.3 tracks release-scale concurrent stress, RSS and FD measurements. |
-| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V079 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
+| G10 | ASan/UBSan/LSan (supported), TSan, static analysis and fuzz results | NOT RUN | V080 sanitizer and TSan concurrency passes. V043 static analysis covers an earlier checkpoint. Full gate remains open for fuzz verification and revalidation across the complete supported matrix. |
 | G11 | Schema modes, nested atomic patches, increment and conditional-stock correctness | NOT RUN | — |
 | G12 | Query/secondary-index consistency, unique races and persistence | NOT RUN | — |
 | G13 | REST/cgo integration, HTTP errors, API docs and actual client examples | NOT RUN | — |
@@ -302,6 +302,7 @@ Record actual local and CI runs here. Add one row per meaningful verification; g
 | V077 | 2026-11-27 / P4.3 group commit based on `2836a4c` | GCC Debug baseline/test-first build, focused group/interval/TTL targets, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 28/28. Corrected fixture include path and moved its sync gate past startup directory sync. Group success, uncertain outcomes, caps, WAL rotation, acknowledged SIGKILL recovery and purge sync passed. Group target passed 10 executions, all full profiles passed 29/29 each, and TSan passed 30 executions. |
 | V078 | 2026-11-28 / P4.4 streamed Bloom reads based on `3572974` | Archived GCC Debug baseline and failing reader regression, focused reader/compaction, full GCC Debug, Clang Release, ASan/UBSan/LSan, Docker Release and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 29/29. Original reader rejected 80 bytes of filters under a 20-byte cap. The updated reader streams 20-byte partitions, bypasses reported corruption, and preserves I/O errors. Public reopen, scan, compaction into four outputs and reinsertion passed. Full profiles passed 29/29 each, focused reader passed 10 runs, and TSan passed 35 executions. |
 | V079 | 2026-11-28 / P4.4 partitioned SSTables based on `f1e3b7e` | GCC Debug baseline, test-first build, focused writer/reader/compaction, repeated reader, full GCC/Clang/ASan/UBSan/LSan/Docker and TSan. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | Baseline 29/29. New test failed to compile before partitioned writing. The final cases pass directory saturation, corrupt directory/leaf/filter handling, a 2,048-row table over 2 MiB under 64 KiB reader workspace, and mixed v1/v2 reopen/compaction. Full profiles 29/29 and TSan 35 executions. |
+| V080 | 2026-11-28 / P4.5 LZ4 based on `f970678` | Test-first build, GCC Debug with codec on/off, enabled Clang and sanitizers, CMake install consumers, and both Docker Release variants. [Commands and results](docs/verification/NATIVE_CHECKPOINT.md). | PASS | The test build found the missing codec. The enabled build verifies compressed/raw blocks, invalid checksums, malformed payload, length caps, cache charges and mixed compaction. The disabled build refuses the codec explicitly. Full profiles and both Docker builds passed 30/30. Installed static and shared clients ran. TSan passed 35 executions. |
 
 Suggested commands to establish or adapt in P0 (not executed here):
 
@@ -625,14 +626,19 @@ These are deliberate boundaries, not completed features:
 - Added an opt-in v2 writer and version-selected reader. The current leaf and directory share the index budget. Each iterator loads one leaf and preserves version ordering across leaf boundaries. Capped admission, corruption diagnostics and v1 compatibility passed. See ADR 0011.
 - V079 passed 29/29 in the full GCC Debug, Clang Release, ASan/UBSan with leak detection, and Docker Release profiles. TSan passed 35 executions. P4.4 is DONE. Prepared a disposable Docker toolchain with Debian `liblz4-dev` 1.9.4-1 for P4.5.
 
+### Session 033 — 2026-11-28 — Add optional LZ4 SSTable compression
+
+- Pushed P4.4 as `f970678`. Added codec and mixed compaction cases first. The test build failed on the missing codec enum. Added optional LZ4 through `liblz4` 1.9.4, with a checked v2 envelope and raw fallback. Reader scratch, writer state, and cache entries are budgeted. Disabled builds reject files declaring the codec.
+- V080 passed GCC Debug with both codec configurations, Clang Release and ASan/UBSan with leak detection with LZ4, and both Docker Release builds at 30/30 each. TSan passed 35 concurrency executions. Installed static and shared examples each printed `hello`. P4.5 remains IN_PROGRESS for Zstd.
+
 ## 9. Current handoff
 
 - **Current milestone:** P4 — performance and configuration hardening.
 - **Next task ID:** P4.5.
-- **Next action:** Add optional LZ4 SSTable block compression with per-file codec identification and bounded decoding.
-- **Next commands:** Add compressible and raw-fallback block tests, corrupt length/checksum cases, and mixed compressed/uncompressed compaction before changing `flush_block`, `load_block`, and `load_properties`. Verify workspace and cache charges with both builds, reader compatibility with v1/v2, and explicit unsupported status in a codec-disabled build. Use `fastdb-local-toolchain:lz4` for the enabled build and run the V079 matrix.
-- **Last verified good checkpoint:** V079 partitioned SSTables based on `f1e3b7e`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records focused and full passes.
-- **Working-tree state:** V079 includes the v2 writer, reader, tests, API and format documentation. Confirm with `git status --short --branch`.
+- **Next action:** Add Zstd as a second optional v2 codec with bounded encoder and decoder state.
+- **Next commands:** Extend `tests/native/sstable_codec.c` and `tests/native/compaction.c` with Zstd fixtures and mixed plain/LZ4/Zstd compaction. Verify the supported `libzstd` APIs before adding CMake opt-in and codec dispatch in `src/storage/block_codec.c`. Bound the decoder context, window, stored bytes and decoded bytes. Keep LZ4's in-place path, and charge independent Zstd scratch and context if needed. Verify unknown/disabled codec handling, malformed frames, mixed compaction and reopen, then run the V080 matrix plus a dual-codec build.
+- **Last verified good checkpoint:** V080 optional LZ4 based on `f970678`. [Native verification](docs/verification/NATIVE_CHECKPOINT.md) records the test-first and final runs.
+- **Working-tree state:** V080 includes codec code, CMake and Docker options, tests and documentation. Confirm with `git status --short --branch`.
 - **Unresolved blockers:** B002 license decision and B003 uncertainty about real legacy sources. B004's local runtime blocker is resolved by V062; broader platform coverage remains unverified.
 - **Critical limits:** One snapshot per handle. LSM scans make repeated seeks under the mutex. Compaction retains masks outside the verified bottom-level rule and the latest expired PUT per key. Memory eviction is opt-in and walks the live tree once per victim. Size-tiered compaction, power-loss tests and release-scale verification remain open.
 

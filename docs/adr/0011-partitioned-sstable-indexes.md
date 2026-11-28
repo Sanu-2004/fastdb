@@ -18,3 +18,14 @@ comparisons, then follows sequential leaves when a key has more history.
 Recovery validates the entire ordered stream and its Bloom partitions.
 The format and workspace let compaction mix v1 and v2 inputs while
 preserving one atomic catalog publication.
+
+### Optional compression
+
+V2 reuses the properties codec field for LZ4. Each index entry addresses
+the stored block, and a block stays in the raw representation when its
+compression savings are small. A compressed envelope checks the exact
+input and decoded lengths. The reader uses the library's documented
+in-place decompression margin, with the input at the end of its scratch
+space. Cache entries retain verified decoded data and the stored length
+needed to match a future index entry. Uncompressed v1 and v2 formats can
+be read with or without the optional codec dependency.
